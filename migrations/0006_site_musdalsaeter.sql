@@ -1,0 +1,24 @@
+-- Add Musdalsæter as a site: the Tretten area in Øyer, Gudbrandsdalen.
+--
+--   npx wrangler d1 execute orb-wave --remote --file=./migrations/0006_site_musdalsaeter.sql
+--
+-- Schema-free, like 0005 - one row in `site`, resolved at read time, no backfill
+-- and no Worker deploy. Safe to re-run: INSERT OR IGNORE against the UNIQUE name.
+--
+-- The box: 61.27-61.38 N, 10.12-10.36 E, roughly 12 x 13 km. Unlike the coastal
+-- boxes this one was not picked off a map - it is drawn around the 109 stored
+-- measurements that already sit up there, every one of them inside 61.3189-61.3195
+-- by 10.2268-10.2273, which is a 60 x 27 m cluster and therefore a moored
+-- deployment rather than a drift. The margin around it is what makes the box
+-- survive a buoy that is moved to the next water, and it reaches east far enough
+-- to take in Tretten itself (61.32 N, 10.30 E), about 4 km from the mooring.
+--
+-- Named Musdalsæter rather than Tretten because that is where the instrument is;
+-- Tretten is the village it is filed under. Both fall in this box, so the choice
+-- is about what the picker says, not about which rows are matched.
+--
+-- No overlap with anything else - the nearest box, Lillestrøm, tops out at 60.02
+-- N, a degree and a quarter south - so the smallest-box rule never comes into
+-- play here. It is nested against nothing.
+INSERT OR IGNORE INTO site (name, lat_min, lat_max, lng_min, lng_max) VALUES
+  ('Musdalsæter', 61.27, 61.38, 10.12, 10.36);

@@ -1,0 +1,2119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ORB telemetry</title>
+<!--
+  Leaflet is the one dependency, pinned and subresource-integrity checked. Map
+  tiles are fetched by the browser straight from openstreetmap.org, so they never
+  pass through the Worker and cost nothing against its request budget.
+-->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha512-Zcn6bjR/8RZbLEpLIeOwNtzREBAJnUKESxces60Mpoj+2okopSAcSUIUOseddDm0cxnGQzxIR7vJgsLZbdLE3w=="
+      crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha512-BwHfrr4c9kmRkLw6iXFdzcdWV/PGkVgiIyIWLLlTSXzWQzxuSg4DiQUCpauz/EWjgk5TYQqX/kvn9pG1NpYfqg=="
+        crossorigin=""></script>
+<style>
+  /*
+    Palette roles. Light values on :root, dark values redefined under both the OS
+    media query and an explicit [data-theme="dark"] stamp, so a toggle - if one
+    is ever added - wins in either direction.
+
+    The eight categorical slots are used in fixed order and never cycled; the
+    temperature chart is the only consumer that can reach slot 8 (the drifter
+    carries at most max_number_of_thermometres = 8 sensors).
+  */
+  :root {
+    color-scheme: light;
+    --page:           #f9f9f7;
+    --surface-1:      #fcfcfb;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --grid:           #e1e0d9;
+    --axis:           #c3c2b7;
+    --border:         rgba(11, 11, 11, 0.10);
+    --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+    --series-5: #e87ba4; --series-6: #008300; --series-7: #4a3aa7; --series-8: #e34948;
+    --ramp: #cde2fb, #b7d3f6, #9ec5f4, #86b6ef, #6da7ec, #5598e7, #3987e5,
+            #2a78d6, #256abf, #1c5cab, #184f95, #104281, #0d366b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page:           #0d0d0d;
+      --surface-1:      #1a1a19;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --grid:           #2c2c2a;
+      --axis:           #383835;
+      --border:         rgba(255, 255, 255, 0.10);
+      --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+      --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:           #0d0d0d;
+    --surface-1:      #1a1a19;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --axis:           #383835;
+    --border:         rgba(255, 255, 255, 0.10);
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 20px 64px;
+    background: var(--page);
+    color: var(--text-primary);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+
+  header { margin-bottom: 20px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--text-secondary); font-size: 13px; }
+  h2.section {
+    font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-secondary); margin: 28px 0 10px;
+  }
+
+  /*
+    One filter row above everything it scopes - never inside a chart card - and
+    frozen to the top of the viewport, because what it scopes is taller than a
+    screen. Reading the waterfall used to mean scrolling the range buttons and
+    the taper out of reach.
+
+    The negative inline margin lets the background span the body's own padding,
+    so nothing peeks past the bar at the edges. z-index clears Leaflet, which
+    puts its control corners at 1000 and would otherwise push the zoom buttons
+    through the bar as the map scrolls under it.
+  */
+  .filters {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    position: sticky; top: 0; z-index: 1200;
+    background: var(--page);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 20px; margin: 0 -20px 20px;
+  }
+  .filters .spacer { flex: 1 1 auto; }
+  select, button {
+    font: inherit; color: var(--text-primary);
+    background: var(--surface-1);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 10px; cursor: pointer;
+  }
+  button:hover, select:hover { border-color: var(--axis); }
+  button[aria-pressed="true"] { background: var(--series-1); border-color: var(--series-1); color: #fff; }
+  .seg { display: flex; gap: 4px; }
+
+  /*
+    The taper pair reads as one control, so the two pickers share a border rather
+    than carrying one each - the group is the thing, and f1 alone means nothing.
+    That means undoing the border, background and padding the bar's other selects
+    carry, which is what the reset below is for.
+  */
+  .taper {
+    display: flex; align-items: center; gap: 6px;
+    background: var(--surface-1);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 5px 10px;
+  }
+  .taper:focus-within { border-color: var(--axis); }
+  .taper label { font-size: 12px; color: var(--text-secondary); }
+  .taper select, .taper input[type="date"] {
+    font: inherit; font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+    background: transparent; border: none; border-radius: 0; padding: 0;
+  }
+  .taper select:hover { border-color: transparent; }
+  .taper select:focus { outline: none; }
+  .taper input[type="date"] { color-scheme: inherit; font-size: 13px; }
+  .taper-sep, .taper-unit { font-size: 12px; color: var(--text-muted); }
+
+  .tiles { display: grid; gap: 12px; margin-bottom: 4px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .tile .label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
+  .tile .value { font-size: 28px; font-weight: 600; line-height: 1.15; margin-top: 4px; }
+  .tile .value.small { font-size: 18px; }
+  .tile .unit { font-size: 15px; font-weight: 400; color: var(--text-secondary); margin-left: 3px; }
+  .tile .note { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+  .card { position: relative; background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .card h3 { font-size: 14px; font-weight: 600; margin: 0 0 2px; }
+  /* Two cards side by side, each half the width of a full card; stacked on narrow screens. */
+  .pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-bottom: 16px; }
+  .pair .card { margin-bottom: 0; min-width: 0; }
+  @media (max-width: 760px) { .pair { grid-template-columns: minmax(0, 1fr); } }
+  .card .cap { font-size: 12px; color: var(--text-secondary); margin: 0 0 12px; }
+  /*
+    The scalars behind the plotted curve, on the card rather than in a tooltip:
+    which measurement this is, is a thing to read while looking at the spectrum,
+    not something to go hunting for with the pointer.
+  */
+  .card .meta {
+    font-size: 12px; color: var(--text-secondary); margin: -8px 0 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .card .meta b { color: var(--text-primary); font-weight: 600; }
+  .card .meta .sep { color: var(--text-muted); margin: 0 7px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 0 0 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+  .swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+  .tip {
+    position: absolute; pointer-events: none; opacity: 0;
+    transform: translate(-50%, -100%);
+    background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 9px; font-size: 12px; white-space: nowrap;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.13); transition: opacity 90ms linear; z-index: 4;
+  }
+  .tip b { font-weight: 600; }
+  .tip .row { display: flex; align-items: center; gap: 6px; }
+
+  .colorbar { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+  .colorbar canvas { border-radius: 3px; border: 1px solid var(--border); }
+
+  /* Leaflet needs a laid-out height before it will render tiles. */
+  #plot-track { height: 380px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); }
+  .leaflet-container { background: var(--page); font: inherit; }
+
+  /*
+    OSM ships one raster style, and it is a light one. Inverting the tile pane and
+    rotating the hue back keeps land/water reading the right way round in dark
+    mode; the marker and attribution panes sit outside it and stay untouched.
+  */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.9); }
+  }
+  :root[data-theme="dark"] .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.9); }
+
+  /* Match Leaflet's tooltip to the .tip used by every other chart. */
+  .leaflet-tooltip {
+    background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 9px; font-size: 12px; white-space: nowrap;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.13);
+  }
+  .leaflet-tooltip b { font-weight: 600; }
+  /* The callout arrow is a border triangle, so it takes the surface colour. */
+  .leaflet-tooltip-top::before    { border-top-color: var(--surface-1); }
+  .leaflet-tooltip-bottom::before { border-bottom-color: var(--surface-1); }
+  .leaflet-tooltip-left::before   { border-left-color: var(--surface-1); }
+  .leaflet-tooltip-right::before  { border-right-color: var(--surface-1); }
+  .leaflet-control-attribution { background: var(--surface-1); color: var(--text-muted); }
+  .leaflet-control-attribution a { color: var(--text-secondary); }
+
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  th { color: var(--text-secondary); font-weight: 600; }
+  th:first-child, td:first-child { text-align: left; }
+  .tablewrap { overflow-x: auto; max-height: 360px; overflow-y: auto; }
+  /* Header stays put while the rows scroll. With border-collapse the border
+     scrolls away with the body, so the rule under it is a shadow instead. */
+  .tablewrap > table > thead th {
+    position: sticky; top: 0; z-index: 1; background: var(--surface-1);
+    box-shadow: inset 0 -1px 0 var(--grid);
+  }
+
+  /* Expandable rows: the raw spectrum behind each wave measurement. */
+  tr.expandable { cursor: pointer; }
+  tr.expandable:hover td, tr.expandable:focus-visible td { background: var(--page); }
+  tr.expandable:focus-visible { outline: 2px solid var(--series-1); outline-offset: -2px; }
+  td.chev { color: var(--text-muted); width: 1.2em; text-align: center; padding-right: 0; }
+  tr.detail > td { padding: 0 8px 14px 30px; border-bottom: 1px solid var(--grid); }
+  .bins { max-height: 260px; overflow-y: auto; display: inline-block; min-width: 340px; }
+  .bins table { width: auto; }
+  .bins th { position: sticky; top: 0; background: var(--surface-1); }
+  .bins td, .bins th { border-bottom: none; padding: 3px 10px 3px 0; font-size: 12px; }
+  .bins caption {
+    caption-side: top; text-align: left; color: var(--text-secondary);
+    font-size: 12px; padding: 8px 0 6px;
+  }
+
+  .empty { color: var(--text-secondary); padding: 28px 0; text-align: center; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Open Radio Buoy — telemetry</h1>
+  <div class="sub" id="subtitle">Loading…</div>
+</header>
+
+<div class="filters">
+  <select id="buoy" aria-label="Buoy"></select>
+  <select id="site" aria-label="Site"></select>
+  <div class="seg" id="range" role="group" aria-label="Time range">
+    <button data-hours="0.5">30 min</button>
+    <button data-hours="1">1 h</button>
+    <button data-hours="24">24 h</button>
+    <button data-hours="168">7 d</button>
+    <button data-hours="720">30 d</button>
+    <button data-hours="0" aria-pressed="true">All</button>
+  </div>
+  <!-- Explicit date range. When either date is set it replaces the preset above. -->
+  <div class="taper" role="group" aria-label="Date range">
+    <label for="date-from">From</label>
+    <input type="date" id="date-from" aria-label="From date">
+    <label for="date-to">To</label>
+    <input type="date" id="date-to" aria-label="To date (inclusive)">
+  </div>
+  <!--
+    A pair of pickers rather than free numbers. The useful settings are a short
+    list - the drifter's own 0.03/0.05 for comparing against its Hs, something
+    higher when a capture has drift the taper has to reach further up to kill,
+    and 0/0 to see the stored low end untouched - and a list makes them reachable
+    in one click instead of a dozen spinner steps. Equal values still give the
+    hard cutoff this replaced.
+
+    The options are filled in by TAPER_STEPS in the script rather than written
+    out here, so the list the pickers offer and the list a remembered taper is
+    validated against cannot drift apart.
+  -->
+  <div class="taper" role="group" aria-label="Low-frequency taper">
+    <label for="taper-f1">Taper</label>
+    <select id="taper-f1" aria-label="Taper f1, zero below this frequency, Hz"></select>
+    <span class="taper-sep">–</span>
+    <select id="taper-f2" aria-label="Taper f2, full weight above this frequency, Hz"></select>
+    <span class="taper-unit">Hz</span>
+  </div>
+  <!--
+    Minimum net drift. Shares the taper's group styling because it is the same
+    kind of control - a view filter over rows already fetched, not a query - and
+    the bar reads better with one visual language for those.
+  -->
+  <div class="taper" role="group" aria-label="Minimum net drift">
+    <label for="min-drift">Min drift</label>
+    <select id="min-drift" aria-label="Minimum net drift of the capture window, metres"></select>
+    <span class="taper-unit">m</span>
+    <label for="max-drift">Max drift</label>
+    <select id="max-drift" aria-label="Maximum net drift of the capture window, metres"></select>
+    <span class="taper-unit">m</span>
+  </div>
+  <div class="spacer"></div>
+  <button id="toggleTheme" aria-label="Toggle dark and light mode">Dark</button>
+  <button id="toggleTable" aria-pressed="false">Table view</button>
+  <button id="refresh">Refresh</button>
+</div>
+
+<!--
+  Table view sits directly under the filters, above the tiles and charts: when it
+  is switched on it is what the user asked for, so it should not be a scroll away.
+-->
+<div id="tables" hidden>
+  <h2 class="section">Table view</h2>
+  <div class="card" id="card-table-wave">
+    <h3>Wave measurements</h3>
+    <p class="cap">Click a row for the raw spectrum bins behind it.</p>
+    <div class="tablewrap"><table id="table-wave"></table></div>
+  </div>
+  <div class="card" id="card-table-gps">
+    <h3>GPS fixes</h3>
+    <div class="tablewrap"><table id="table-gps"></table></div>
+  </div>
+  <div class="card" id="card-table-temp">
+    <h3>Temperature readings</h3>
+    <div class="tablewrap"><table id="table-temp"></table></div>
+  </div>
+</div>
+
+<div class="tiles" id="tiles"></div>
+
+<h2 class="section" id="sec-wave">Waves</h2>
+<div class="card" id="card-hs">
+  <h3>Significant wave height</h3>
+  <p class="cap">H<sub>s</sub> per measurement window, metres.</p>
+  <div class="plot" id="plot-hs"></div>
+  <div class="tip" id="tip-hs"></div>
+</div>
+
+<div class="card" id="card-periods">
+  <h3>Wave periods</h3>
+  <p class="cap">Seconds, sharing one axis. Names ending in “, buoy” are as transmitted; the rest are computed here from the spectrum, through the taper. T<sub>p</sub> is 1/f at the spectral peak, T<sub>m01</sub> = m₀/m₁, T<sub>m02</sub> = √(m₀/m₂). Two lines are the same quantity twice — T<sub>p</sub> against T<sub>p</sub>, buoy, and T<sub>m02</sub> against T<sub>z</sub> — and the gap in each pair is what the taper and the wire format removed. T<sub>p</sub> steps in whole bins, so read trends off T<sub>m01</sub> and T<sub>m02</sub>.</p>
+  <div class="legend" id="legend-periods"></div>
+  <div class="plot" id="plot-periods"></div>
+  <div class="tip" id="tip-periods"></div>
+</div>
+
+<div class="card" id="card-fall">
+  <h3>Spectrum waterfall</h3>
+  <p class="cap">Elevation PSD, m²/Hz, derived from the transmitted acceleration PSD. One column per measurement, evenly spaced — hover a column to read it below; click to pin it. Bins the taper in the filter row zeroes are not drawn, and the rest are weighted by it.</p>
+  <div class="plot" id="plot-fall"></div>
+  <div class="colorbar">
+    <span id="cb-min">0</span>
+    <canvas id="cb" width="180" height="10"></canvas>
+    <span id="cb-max">—</span>
+    <span style="color:var(--text-muted)">m²/Hz</span>
+  </div>
+  <div class="tip" id="tip-fall"></div>
+</div>
+
+<!--
+  The two spectra, stacked and sharing a bin grid, a frequency axis and a taper:
+  what the drifter sent, and what it means. The only step between them is the
+  division by (2*pi*f)^4, and stacking them is what makes that step visible -
+  the low end climbs by six decades on the way down the page.
+-->
+<div class="pair">
+<div class="card" id="card-spec-acc">
+  <h3>Acceleration spectrum</h3>
+  <p class="cap" id="spec-acc-cap">Latest measurement.</p>
+  <div class="plot" id="plot-spec-acc"></div>
+  <div class="tip" id="tip-spec-acc"></div>
+</div>
+
+<div class="card" id="card-spec">
+  <h3>Elevation spectrum</h3>
+  <p class="cap">S<sub>η</sub> = S<sub>acc</sub> / (2πf)⁴, m²/Hz — the same bins as above, converted at ingest. Both axes are logarithmic.</p>
+  <div class="plot" id="plot-spec"></div>
+  <div class="tip" id="tip-spec"></div>
+  <p class="meta" id="spec-meta"></p>
+</div>
+</div>
+
+<h2 class="section" id="sec-gps">Position</h2>
+<div class="card" id="card-track">
+  <h3>Drift track</h3>
+  <p class="cap" id="track-cap">Every GPS fix in this slice, oldest to newest, on OpenStreetMap. Hover a fix for time, position and speed.</p>
+  <div class="plot" id="plot-track"></div>
+</div>
+
+<div class="card" id="card-speed">
+  <h3>Speed over ground</h3>
+  <p class="cap">Metres per second, from the GPS fix. Heading is in the tooltip and the table.</p>
+  <div class="plot" id="plot-speed"></div>
+  <div class="tip" id="tip-speed"></div>
+</div>
+
+<h2 class="section" id="sec-temp">Temperature</h2>
+<div class="card" id="card-temp">
+  <h3>Thermometer string</h3>
+  <p class="cap">Degrees Celsius per sensor, in sensor order. Values outside −20…60 °C are dropped as sensor faults rather than plotted.</p>
+  <div class="legend" id="legend-temp"></div>
+  <div class="plot" id="plot-temp"></div>
+  <div class="tip" id="tip-temp"></div>
+</div>
+
+</div>
+
+<script>
+/* ---------- state ---------- */
+
+/*
+  waveAll is what the API served; waveRows is what the page draws.
+
+  They differ by the minimum-drift filter and nothing else. Splitting them is what
+  lets that filter be re-applied without a refetch, and it is why every renderer
+  below can go on reading waveRows without knowing a filter exists - the one rule
+  is that nothing but applyMinDrift may assign to waveRows.
+*/
+let waveAll = [];       // all four arrays are oldest-first, as served by the API
+let waveRows = [];
+let gpsRows = [];
+let tempRows = [];
+let selectedIndex = -1; // waterfall column pinned/hovered; -1 = latest
+let pinned = false;
+let hours = 0;
+let dateFrom = "";   // yyyy-mm-dd in local time; "" = open. Either set overrides `hours`.
+let dateTo = "";
+let buoy = "all";
+
+/*
+  Named place, matched against the lat/lng the Worker stamps on each measurement
+  from the nearest GPS fix. "all" is no filter.
+
+  A measurement with no position - its 'G' note was lost, or landed outside the
+  staleness window - matches NO site, not every site. It is only reachable on
+  "All places", which is the honest behaviour: an unpositioned measurement cannot
+  be claimed for a fjord, and quietly showing it under whichever one is selected
+  would put it on the wrong map.
+*/
+let site = "all";
+
+/*
+  Low-frequency half-cosine taper for the elevation spectrum, Hz. Purely a view:
+  D1 stores every bin the drifter sent, so f1 = f2 = 0 really does show the low
+  end rather than a floor someone already applied.
+
+  Why a taper and not a cutoff. Dividing the acceleration PSD by omega^4
+  multiplies the lowest stored bin by ~1e6, so whatever the accelerometer was
+  doing down there dominates the plot completely and has to be suppressed. A hard
+  cut does suppress it, but it also puts a step in the spectrum at an arbitrary
+  frequency, and the Hs computed from it jumps as the control moves. The
+  half-cosine ramps the weight from 0 at f1 to 1 at f2 instead, which is what the
+  drifter itself does (kTaperF1/kTaperF2, lowFreqTaper in wave_analysis.cpp).
+
+  A CUTOFF IS THE DEGENERATE CASE: with f1 = f2 the weight is 0 below and 1 above
+  with nothing in between, which is exactly the old control. Setting both to the
+  same number is how you get it back, so nothing was lost by replacing it.
+
+  The default mirrors the firmware's own 0.03/0.05, which is what makes the
+  "Hs spectrum" tile comparable with the "Hs" the drifter transmits - the drifter
+  computes its moments through this same taper. The previous default was a hard
+  cut at 0.05 Hz; on stored measurements from before the firmware's kPsdMinFreq
+  floor, which carry bins down to 0.0049 Hz, this is a gentler version of it.
+
+  It scopes the spectrum plot, the waterfall and the Hs computed from them. The
+  expanded rows in the table view are the stored bins and stay unfiltered.
+*/
+let taperF1 = 0.03;
+let taperF2 = 0.05;
+
+/*
+  What each end of the taper offers, and the only values it can hold - the two
+  pickers in the filter bar are built from these lists.
+
+  f1 stops at 0.3 Hz. It is the frequency below which everything is discarded,
+  and throwing away everything slower than a 3 s wave is no longer a
+  low-frequency cleanup on a fjord record. f2 runs to 0.5: it only has to be
+  reachable from f1, since the ramp needs somewhere above f1 to finish.
+
+  0.03 is on BOTH lists despite being off the round grid. On f1 it is the
+  drifter's own kTaperF1, half of the pair that makes the "Hs spectrum" tile
+  comparable with the Hs the drifter transmits; on f2 it is there so every f1
+  value has an equal partner, which is what keeps the f1 == f2 cutoff above
+  reachable at every step rather than at all but one of them. 0 in both keeps
+  "no taper" reachable.
+*/
+const TAPER_STEPS = {
+  f1: [0, 0.03, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3],
+  f2: [0, 0.03, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5],
+};
+
+/*
+  Two decimals everywhere a taper frequency is written, so the pickers, the tile
+  notes and the empty states all say the same thing about the same number - 0.1
+  reading as "0.10" in one place and "0.1" in another looks like two settings.
+
+  It also matters mechanically: option values are compared as strings by the DOM,
+  and setting a select to a string no option carries blanks it silently, which is
+  the exact failure of showing one thing while the state holds another.
+*/
+const taperOption = (v) => v.toFixed(2);
+
+/*
+  Minimum net drift, metres. A measurement whose window moved less than this is
+  hidden - the point being to separate a buoy sitting on its mooring from one the
+  current actually carried somewhere.
+
+  0 means off, and it has to be on the list rather than implied by a blank: the
+  picker is then the same shape as the taper's, and "no filter" is a value you
+  choose rather than one you clear.
+
+  Applied to WAVE ROWS ONLY, and that is not an oversight. Net drift is measured
+  across a capture window, and only the 'W' message carries both of its ends - a
+  GPS fix or a temperature reading is one instant with nothing to subtract from
+  it. Filtering them by a quantity they do not have would mean inventing one.
+*/
+const DRIFT_STEPS = [0, 50, 100, 200, 300, 400, 500, 750, 1000];
+let minDrift = 0;
+// Maximum net drift, same steps. 0 means no limit.
+let maxDrift = 0;
+
+/*
+  The rows the page draws, given the current threshold.
+
+  A row whose drift cannot be measured - no start position, or a saturated 0,0 at
+  either end - is kept at 0 m and dropped above it. The filter asks "did this move
+  at least X", and a row that cannot answer must not be counted as a yes; at 0 m
+  there is no question being asked, so nothing is excluded. This mirrors the site
+  filter, which drops positionless rows rather than claiming them for a place.
+*/
+function applyMinDrift() {
+  if (minDrift <= 0 && maxDrift <= 0) {
+    waveRows = waveAll;
+    return;
+  }
+  waveRows = waveAll.filter((r) => {
+    const d = driftOf(r);
+    return d !== null && d.metres >= minDrift && (maxDrift <= 0 || d.metres <= maxDrift);
+  });
+}
+
+/*
+  The weight itself, identical to lowFreqTaper() in wave_analysis.cpp: 0 at and
+  below f1, 1 at and above f2, half-cosine between.
+
+  The f <= f1 test comes FIRST, which is what makes f1 == f2 a hard cut rather
+  than a divide by zero - at f == f1 == f2 the first branch answers 0 and the
+  ramp is never evaluated.
+*/
+function taperWeight(f) {
+  if (f <= taperF1) return 0;
+  if (f >= taperF2) return 1;
+  return 0.5 * (1 - Math.cos(Math.PI * (f - taperF1) / (taperF2 - taperF1)));
+}
+
+/*
+  How the current setting reads in prose. The three cases are genuinely three
+  different things and calling them all "taper" would be misleading: with both at
+  zero nothing is suppressed at all, and with f1 == f2 the result is a cutoff,
+  which is the word for it.
+*/
+function taperLabel() {
+  if (taperF1 <= 0 && taperF2 <= 0) return "no taper";
+  if (taperF1 === taperF2) return "a cut below " + taperOption(taperF1) + " Hz";
+  return "a " + taperOption(taperF1) + "–" + taperOption(taperF2) + " Hz taper";
+}
+
+/*
+  The bins of one measurement, through the taper. Frequencies and PSD both come
+  straight off wave_bin - stored per bin, in m2/Hz - so nothing here reconstructs
+  a grid from f_min/f_max, and a truncated message cannot be stretched across a
+  band it never covered.
+
+  The weight is applied SQUARED, as the drifter applies it: the half-cosine is an
+  amplitude taper, and the PSD is an amplitude squared. Firmware writes
+  psd_eta = pacc / w^4 * (taper * taper), and matching it is the whole reason the
+  Hs computed here can be held against the Hs the drifter sent.
+
+  Zero-weight bins are dropped rather than kept as zeros, which is what the hard
+  cutoff did before: a run of zeros at the bottom would stretch the frequency
+  axis over a band with nothing in it and put a floor of log(0) in the log chart.
+*/
+function spectrumOf(r) {
+  const bins = r.spectrum.length;
+  const freqs = [], psd = [], psdAcc = [];
+  for (let b = 0; b < bins; b++) {
+    const w = taperWeight(r.freqs[b]);
+    if (w <= 0) continue;
+    freqs.push(r.freqs[b]);
+    psd.push(r.spectrum[b] * w * w);
+    // The acceleration spectrum is cut at the same frequencies but NOT weighted.
+    // omega^-4 is what blows the low end up and that is the other plot; the
+    // acceleration PSD is stored as transmitted and is shown as transmitted. The
+    // shared bin range is what keeps the two charts comparable.
+    psdAcc.push(r.spectrum_acc ? r.spectrum_acc[b] : null);
+  }
+  // Bin width, for the moment integral. Taken from the grid itself.
+  const df = r.freqs.length > 1 ? r.freqs[1] - r.freqs[0] : 0;
+  return { freqs, psd, psdAcc, df, bins };
+}
+
+/*
+  The spectral moments of what the taper left: m_n = Σ fⁿ·S(f)·df, over the bins
+  spectrumOf returned. Every scalar below is a ratio of these, so the spectrum is
+  walked once and the moments shared rather than each statistic summing it again.
+
+  The peak frequency rides along for the same reason - it is the same single pass
+  over the same bins, and splitting it out would walk the spectrum twice to save
+  nothing.
+
+  A rectangular sum, not a trapezoid. The bins are a uniform df grid with no
+  endpoint that wants half weight, and the difference between the two rules is
+  far inside the disagreement the taper itself creates - which is the quantity
+  these numbers exist to show.
+*/
+function momentsOf(freqs, psd, df) {
+  let m0 = 0, m1 = 0, m2 = 0, peak = 0, peakF = 0;
+  for (let i = 0; i < psd.length; i++) {
+    const s = psd[i], f = freqs[i];
+    if (!Number.isFinite(s) || !Number.isFinite(f)) continue;
+    m0 += s;
+    m1 += f * s;
+    m2 += f * f * s;
+    // Strictly greater, so a flat run keeps its LOWEST frequency - the same tie
+    // the drifter's own loop resolves the same way.
+    if (s > peak) { peak = s; peakF = f; }
+  }
+  return { m0: m0 * df, m1: m1 * df, m2: m2 * df, peakF };
+}
+
+/*
+  The scalars derived from the elevation spectrum, all through the current taper
+  and so all moving when it moves:
+
+    Hs   = 4√m0        significant height
+    Tp   = 1/f_peak    peak period
+    Tm01 = m0/m1       mean period
+    Tm02 = √(m0/m2)    mean zero-crossing period
+
+  None of the four is what the drifter transmits - it computes its own onboard -
+  so a gap between a pair is information rather than a bug: it is whatever the
+  taper and the wire format between them removed, and with the taper set to the
+  drifter's own kTaperF1/kTaperF2 each pair should very nearly meet.
+
+  Three of them have a transmitted twin, and the methods match on purpose. The
+  drifter's own loop (wave_analysis.cpp) is hs = 4*sqrtf(m0), tz = sqrt(m0/m2)
+  and tp = 1/peakF off the argmax bin - so Hs pairs with Hs, Tp with Tp, and Tm02
+  with Tz, which is the same quantity under the older name. Tm01 is the one with
+  no twin: the drifter never accumulates m1.
+
+  The one asymmetry that remains is RESOLUTION, and it lands on Tp. The drifter
+  finds its peak on the full Welch grid before the bins are grouped for the wire,
+  while this finds it among the grouped bins that were actually sent - so the
+  computed Tp steps in units of df where the transmitted one does not, and the
+  two can differ by a bin's width with nothing wrong. That is also why Tp is a
+  poor line to read a trend off; Tm01 and Tm02 are continuous in the data.
+
+  Tm01 >= Tm02 always - m1² <= m0·m2, Cauchy-Schwarz - so a row where the table
+  shows otherwise is arithmetic gone wrong, not a sea state.
+
+  The higher moment leans harder on the top of the band, which makes Tm02 the
+  more fragile of the two: it is led by the highest bins the drifter sent, and
+  that is exactly where a spectrum truncated into a short message loses bins.
+  When the two disagree about a trend, Tm01 is the steadier number.
+*/
+function spectralStats(freqs, psd, df) {
+  if (!df || !psd.length) return { hs: null, tp: null, tm01: null, tm02: null };
+  const { m0, m1, m2, peakF } = momentsOf(freqs, psd, df);
+  // m0 = 0 is a real spectrum of zeros, not a missing one: height 0, and periods
+  // that genuinely do not exist rather than a 0/0 printed as a number.
+  if (!(m0 > 0)) return { hs: 0, tp: null, tm01: null, tm02: null };
+  return {
+    hs: 4 * Math.sqrt(m0),
+    tp: peakF > 0 ? 1 / peakF : null,
+    tm01: m1 > 0 ? m0 / m1 : null,
+    tm02: m2 > 0 ? Math.sqrt(m0 / m2) : null,
+  };
+}
+
+// A DS18B20 that has dropped off the bus reports 85 or -127, and either one
+// flattens a real 4-18 degree water series into a straight line.
+const TEMP_MIN = -20, TEMP_MAX = 60;
+const plausibleTemp = (v) => (Number.isFinite(v) && v > TEMP_MIN && v < TEMP_MAX ? v : null);
+
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const seriesColor = (slot) => css("--series-" + (slot + 1));
+const rampSteps = () => css("--ramp").split(",").map((s) => s.trim());
+
+const fmtNum = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v) ? "—" : Number(v).toFixed(d));
+
+/*
+  Wave height gets a third decimal; everything else keeps two.
+
+  Two is enough for periods (seconds, order 1-20) and for speed and temperature,
+  but not for Hs on this buoy: a sheltered fjord runs 0.05-0.7 m, where the second
+  decimal is a step of 1-20 % of the reading and a calm record quantises to a
+  handful of distinct values. The extra digit is not a claim about accuracy - it
+  is what keeps the low end from looking like a staircase.
+*/
+const fmtHs = (v) => fmtNum(v, 3);
+const fmtTime = (s) => new Date(s * 1000).toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+const fmtDate = (s) => new Date(s * 1000).toLocaleDateString([], { month: "short", day: "2-digit" });
+
+/* ---------- generic line chart (SVG) ---------- */
+
+function niceTicks(min, max, count) {
+  if (min === max) { min -= 0.5; max += 0.5; }
+  const raw = (max - min) / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const step = (norm >= 5 ? 10 : norm >= 2 ? 5 : norm >= 1 ? 2 : 1) * mag;
+  const first = Math.ceil(min / step) * step;
+  const out = [];
+  for (let v = first; v <= max + step * 1e-6; v += step) out.push(Number(v.toFixed(10)));
+  return out;
+}
+
+/*
+  1-2-5 ticks per decade, the only spacing that reads as logarithmic without a
+  label on every minor. Returns [] when the span is too narrow to carry three of
+  them, so the caller can fall back to evenly spaced samples.
+*/
+function logTicks(min, max) {
+  const out = [];
+  for (let d = Math.floor(Math.log10(min)); d <= Math.ceil(Math.log10(max)); d++) {
+    for (const m of [1, 2, 5]) {
+      const v = Number((m * Math.pow(10, d)).toPrecision(12));
+      if (v >= min && v <= max) out.push(v);
+    }
+  }
+  return out.length >= 3 ? out : [];
+}
+
+/*
+  Decade labels as 10^n. Unicode superscripts rather than a tspan with a raised
+  baseline: one text node stays aligned with the tick and measures the same as
+  every other label in the margin.
+*/
+const SUPERSCRIPT = { "-": "⁻", 0: "⁰", 1: "¹", 2: "²", 3: "³", 4: "⁴", 5: "⁵", 6: "⁶", 7: "⁷", 8: "⁸", 9: "⁹" };
+const sup10 = (v) => "10" + String(Math.round(Math.log10(v))).split("").map((c) => SUPERSCRIPT[c] || c).join("");
+
+// Axis labels take their precision from the tick step, not from the value, so a
+// 0.0005 m2/Hz step prints 0.0005 instead of four rows all reading 0.000.
+function stepDecimals(ticks) {
+  if (ticks.length < 2) return null;
+  const step = Math.abs(ticks[1] - ticks[0]);
+  if (!(step > 0)) return null;
+  return Math.max(0, Math.min(6, -Math.floor(Math.log10(step))));
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const el = (name, attrs) => {
+  const n = document.createElementNS(SVG_NS, name);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+};
+
+function placeTip(tip, host, chartRect, x, y) {
+  const cardBox = (host.offsetParent || host).getBoundingClientRect();
+  tip.style.left = (chartRect.left - cardBox.left + x) + "px";
+  tip.style.top = (chartRect.top - cardBox.top + y) + "px";
+  tip.style.opacity = 1;
+}
+
+/*
+  series: [{name, color, values:[number|null]}], x: shared across series.
+  Hover is a crosshair on the nearest x, never the only way to read a value - the
+  endpoint of each series is direct-labelled and the table view has them all.
+
+  xScale "log" is for frequency, where the swell end of the band is the half of
+  the axis that carries the signal. yTicks is a target, not a count: niceTicks
+  rounds to a readable step and returns however many of those fit.
+
+  yScale "log" with yTickValues pins the y-axis to a fixed decade ladder, so the
+  same PSD reads at the same height in every measurement and two spectra can be
+  compared by eye. The domain is the ladder, not the data.
+*/
+function lineChart(host, tip, { x, series, height = 210, yFormat = (v) => fmtNum(v), xFormat = fmtDate, yUnit = "", tipTime = true, xScale = "linear", yTicks = 4, yScale = "linear", yTickValues = null, points = false }) {
+  host.innerHTML = "";
+  if (!x.length) {
+    host.innerHTML = '<div class="empty">No measurements in this range.</div>';
+    return;
+  }
+
+  // A log axis has no room for zero or negative x. The DC bin is the only one
+  // this drops in practice, and it carries no wave information.
+  const logX = xScale === "log";
+  if (logX && x.some((v) => !(v > 0))) {
+    const keep = x.map((v, i) => (v > 0 ? i : -1)).filter((i) => i >= 0);
+    if (!keep.length) {
+      host.innerHTML = '<div class="empty">No positive frequencies to plot.</div>';
+      return;
+    }
+    const kept = series.map((s) => ({ ...s, values: keep.map((i) => s.values[i]) }));
+    kept.extraTip = series.extraTip;
+    x = keep.map((i) => x[i]);
+    series = kept;
+  }
+
+  const W = Math.max(host.clientWidth || 640, 320);
+  const H = height;
+  const M = { t: 12, r: 62, b: 26, l: 46 };
+  const pw = W - M.l - M.r;
+  const ph = H - M.t - M.b;
+
+  /*
+    A log y-axis cannot place zero, and the uint16 wire quantises the quiet end
+    of a spectrum straight to it. Those bins become gaps in the line rather than
+    being clamped onto the floor tick, which would draw a value that was never
+    measured.
+  */
+  const logY = yScale === "log";
+  if (logY) {
+    const lifted = series.map((s) => ({ ...s, values: s.values.map((v) => (v > 0 ? v : null)) }));
+    lifted.extraTip = series.extraTip;
+    series = lifted;
+  }
+
+  const finite = series.flatMap((s) => s.values).filter((v) => Number.isFinite(v));
+  if (!finite.length) {
+    host.innerHTML = '<div class="empty">No usable values in this range.</div>';
+    return;
+  }
+
+  let ymin, ymax, ladder = null;
+  if (logY) {
+    ladder = (yTickValues && yTickValues.length ? yTickValues.slice() : [1, 0.01]).sort((a, b) => a - b);
+    // The ladder is fixed, but it must never clip: a storm spectrum that runs
+    // past the top tick extends it by its own step instead of being cut off.
+    const stepDec = ladder.length > 1 ? Math.round(Math.log10(ladder[1] / ladder[0])) || 1 : 1;
+    const dataMax = Math.max(...finite);
+    while (dataMax > ladder[ladder.length - 1]) {
+      ladder.push(Number((ladder[ladder.length - 1] * Math.pow(10, stepDec)).toPrecision(15)));
+    }
+    ymin = ladder[0];
+    ymax = ladder[ladder.length - 1];
+
+    // Anything under the floor tick is off-scale, and off-scale is a gap too.
+    if (Math.min(...finite) < ymin) {
+      const clipped = series.map((s) => ({ ...s, values: s.values.map((v) => (v >= ymin ? v : null)) }));
+      clipped.extraTip = series.extraTip;
+      series = clipped;
+    }
+  } else {
+    ymin = Math.min(...finite);
+    ymax = Math.max(...finite);
+    const pad = (ymax - ymin || Math.abs(ymax) || 1) * 0.12;
+    ymin = ymin - pad;
+    ymax = ymax + pad;
+  }
+
+  const tx = logX ? Math.log10 : (v) => v;
+  const ty = logY ? Math.log10 : (v) => v;
+  const xmin = tx(x[0]), xmax = tx(x[x.length - 1]);
+  const ylo = ty(ymin), yhi = ty(ymax);
+  const sx = (v) => M.l + (xmax === xmin ? pw / 2 : ((tx(v) - xmin) / (xmax - xmin)) * pw);
+  const sy = (v) => M.t + ph - ((ty(v) - ylo) / (yhi - ylo)) * ph;
+
+  const svg = el("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img" });
+
+  // Recessive chrome: solid hairlines, one shade off the surface. Never dashed.
+  const yt = logY ? ladder : niceTicks(ymin, ymax, yTicks);
+  const ydec = logY ? null : stepDecimals(yt);
+  const yLabel = logY ? sup10 : ydec === null ? yFormat : (v) => v.toFixed(ydec);
+  for (const t of yt) {
+    svg.appendChild(el("line", { x1: M.l, x2: M.l + pw, y1: sy(t), y2: sy(t), stroke: css("--grid"), "stroke-width": 1 }));
+    const lab = el("text", { x: M.l - 8, y: sy(t) + 4, "text-anchor": "end", fill: css("--text-muted"), "font-size": 11 });
+    lab.textContent = yLabel(t);
+    svg.appendChild(lab);
+  }
+  svg.appendChild(el("line", { x1: M.l, x2: M.l + pw, y1: M.t + ph, y2: M.t + ph, stroke: css("--axis"), "stroke-width": 1 }));
+
+  // Evenly spaced samples of x would clump at the high end once the axis is
+  // logged, so a log axis gets 1-2-5 ticks and the vertical rules that make the
+  // uneven spacing legible as such.
+  const xt = logX ? logTicks(x[0], x[x.length - 1]) : [];
+  if (xt.length) {
+    for (const t of xt) {
+      svg.appendChild(el("line", { x1: sx(t), x2: sx(t), y1: M.t, y2: M.t + ph, stroke: css("--grid"), "stroke-width": 1 }));
+      const lab = el("text", { x: sx(t), y: H - 8, "text-anchor": "middle", fill: css("--text-muted"), "font-size": 11 });
+      lab.textContent = xFormat(t);
+      svg.appendChild(lab);
+    }
+  } else {
+    const xticks = Math.min(6, x.length);
+    for (let i = 0; i < xticks; i++) {
+      const idx = Math.round((i / Math.max(xticks - 1, 1)) * (x.length - 1));
+      const lab = el("text", { x: sx(x[idx]), y: H - 8, "text-anchor": "middle", fill: css("--text-muted"), "font-size": 11 });
+      lab.textContent = xFormat(x[idx]);
+      svg.appendChild(lab);
+    }
+  }
+
+  for (const s of series) {
+    let d = "", pen = false;
+    s.values.forEach((v, i) => {
+      if (!Number.isFinite(v)) { pen = false; return; }
+      d += (pen ? "L" : "M") + sx(x[i]) + " " + sy(v);
+      pen = true;
+    });
+    if (points) {
+      // Markers instead of a connecting line: samples are separate measurements,
+      // and a line between them would claim values for the time in between.
+      s.values.forEach((v, i) => {
+        if (Number.isFinite(v)) svg.appendChild(el("circle", { cx: sx(x[i]), cy: sy(v), r: 3, fill: s.color }));
+      });
+    } else {
+      svg.appendChild(el("path", { d, fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    }
+
+    // Selective direct label: the endpoint only. This is also the relief that the
+    // three sub-3:1 light-mode slots require.
+    let last = -1;
+    s.values.forEach((v, i) => { if (Number.isFinite(v)) last = i; });
+    if (last >= 0) {
+      svg.appendChild(el("circle", { cx: sx(x[last]), cy: sy(s.values[last]), r: 3.5, fill: s.color, stroke: css("--surface-1"), "stroke-width": 2 }));
+      const t = el("text", { x: sx(x[last]) + 9, y: sy(s.values[last]) + 4, fill: css("--text-secondary"), "font-size": 11 });
+      t.textContent = yFormat(s.values[last]) + (yUnit ? " " + yUnit : "");
+      svg.appendChild(t);
+    }
+  }
+
+  const cross = el("line", { x1: 0, x2: 0, y1: M.t, y2: M.t + ph, stroke: css("--axis"), "stroke-width": 1, opacity: 0 });
+  svg.appendChild(cross);
+  const dots = series.map((s) => {
+    const c = el("circle", { r: 4.5, fill: s.color, stroke: css("--surface-1"), "stroke-width": 2, opacity: 0 });
+    svg.appendChild(c);
+    return c;
+  });
+
+  const hit = el("rect", { x: M.l, y: M.t, width: pw, height: ph, fill: "transparent", cursor: "crosshair" });
+  svg.appendChild(hit);
+
+  hit.addEventListener("mousemove", (e) => {
+    const bounds = svg.getBoundingClientRect();
+    const px = e.clientX - bounds.left;
+    let best = 0, bestD = Infinity;
+    x.forEach((v, i) => { const d = Math.abs(sx(v) - px); if (d < bestD) { bestD = d; best = i; } });
+
+    cross.setAttribute("x1", sx(x[best]));
+    cross.setAttribute("x2", sx(x[best]));
+    cross.setAttribute("opacity", 1);
+
+    let html = "<b>" + (tipTime ? fmtTime(x[best]) : xFormat(x[best])) + "</b>";
+    series.forEach((s, si) => {
+      const v = s.values[best];
+      if (Number.isFinite(v)) {
+        dots[si].setAttribute("cx", sx(x[best]));
+        dots[si].setAttribute("cy", sy(v));
+        dots[si].setAttribute("opacity", 1);
+        html += '<div class="row"><span class="swatch" style="background:' + s.color + '"></span>' +
+                s.name + " " + yFormat(v) + (yUnit ? " " + yUnit : "") + "</div>";
+      } else {
+        dots[si].setAttribute("opacity", 0);
+      }
+    });
+    if (typeof series.extraTip === "function") html += series.extraTip(best);
+
+    tip.innerHTML = html;
+    placeTip(tip, host, bounds, sx(x[best]), M.t - 8);
+  });
+  hit.addEventListener("mouseleave", () => {
+    tip.style.opacity = 0;
+    cross.setAttribute("opacity", 0);
+    dots.forEach((d) => d.setAttribute("opacity", 0));
+  });
+
+  host.appendChild(svg);
+}
+
+/* ---------- drift track (SVG, equal aspect) ---------- */
+
+/* ---------- drift track (Leaflet + OpenStreetMap) ---------- */
+
+let trackMap = null;    // built once - rebuilding would throw away the user's pan
+let trackLayer = null;  // everything drawn from data, cleared on each render
+let trackFitKey = "";   // refit the view when the data changes, not when the window resizes
+
+const TRACK_CAP = "Every GPS fix in this slice as a dot, on OpenStreetMap, with each " +
+  "wave measurement drawn as the line its window drifted along - green where the " +
+  "capture started, red where it ended. Hover anything for details.";
+
+/*
+  A fix at exactly 0, 0 is not a position. The drifter casts a negative double
+  straight to uint32 when it builds the reading, which saturates to 0 on that
+  target, so a southern or western coordinate arrives as zero - the same note
+  sits on parseGpsMessage in the Worker. On the autoscaled scatter this was
+  merely a stray point; on a map a single one drags the view to the Gulf of
+  Guinea. They are kept off the map and counted in the caption, so the bug stays
+  visible rather than silently corrected.
+*/
+const isNullIsland = (r) => r.lat === 0 && r.lng === 0;
+
+/*
+  Net drift of one capture window: the straight line from where the window opened
+  to where it closed, in metres, with the bearing and the mean speed along it.
+
+  NET, and the word is load-bearing. This is displacement, not path length: the
+  buoy's actual track over those 30 minutes is not sampled - only the two ends
+  ride in the 'W' message - so a buoy that went out and came back reads as having
+  drifted nowhere, which is the honest answer to what is being asked. It is the
+  quantity a surface current integrates to, and it is a floor on the distance
+  travelled, never the distance itself.
+
+  Haversine rather than the flat approximation the drift lines are drawn with.
+  Over a few hundred metres the two agree to well under a metre, but this number
+  is printed to the metre and the cheap version would make its last digit an
+  artefact of the projection.
+
+  Both ends must be real. A row stored before lat_start existed, or a capture
+  that held no fix at one end, returns null and is left out rather than measured
+  from a zero - and 0,0 is the saturated reading the map already drops, not a
+  position in the Gulf of Guinea.
+*/
+const EARTH_R = 6371008.8;   // metres, IUGG mean radius
+const COMPASS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                 "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+const compass = (deg) => COMPASS[Math.round(deg / 22.5) % 16];
+
+function driftOf(r) {
+  if (!Number.isFinite(r.lat_start) || !Number.isFinite(r.lng_start) ||
+      !Number.isFinite(r.lat) || !Number.isFinite(r.lng)) return null;
+  if ((r.lat_start === 0 && r.lng_start === 0) || isNullIsland(r)) return null;
+
+  const rad = Math.PI / 180;
+  const p1 = r.lat_start * rad, p2 = r.lat * rad;
+  const dp = p2 - p1, dl = (r.lng - r.lng_start) * rad;
+
+  const a = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+  // asin of a clamped root, not atan2: the argument can exceed 1 by a rounding
+  // step on two positions metres apart, and Math.sqrt of that is NaN.
+  const metres = 2 * EARTH_R * Math.asin(Math.min(1, Math.sqrt(a)));
+
+  // Initial great-circle bearing. Over these distances it is the bearing.
+  const y = Math.sin(dl) * Math.cos(p2);
+  const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  const bearing = (Math.atan2(y, x) / rad + 360) % 360;
+
+  // Mean speed over the window, which is the current if the buoy is a float. The
+  // window length comes off the row rather than being assumed to be 30 minutes.
+  const secs = r.ts_end - r.ts_start;
+  return { metres, bearing, speed: secs > 0 ? metres / secs : null };
+}
+
+/*
+  Metres under a kilometre, kilometres above it. A drift is tens of metres in a
+  sheltered fjord and can be a couple of kilometres in a current, and neither
+  "0.04 km" nor "2140 m" is the way anyone says it.
+*/
+const fmtDrift = (m) => (m === null || m === undefined ? "—"
+  : m < 1000 ? Math.round(m) + " m" : (m / 1000).toFixed(2) + " km");
+
+const fixTooltip = (r) =>
+  "<b>" + fmtTime(r.timestamp) + "</b>" +
+  "<div>" + r.lat.toFixed(5) + ", " + r.lng.toFixed(5) + "</div>" +
+  "<div>" + fmtNum(r.vel) + " m/s &middot; " + fmtNum(r.direction, 0) + "&deg;</div>";
+
+function trackChart(host, rows) {
+  const fixes = rows.filter((r) => Number.isFinite(r.lat) && Number.isFinite(r.lng));
+  const pts = fixes.filter((r) => !isNullIsland(r));
+  const dropped = fixes.length - pts.length;
+
+  document.getElementById("track-cap").textContent = TRACK_CAP + (dropped
+    ? " " + dropped + (dropped === 1 ? " fix reads exactly 0°, 0° and is" : " fixes read exactly 0°, 0° and are") +
+      " left off the map - the drifter cannot yet send a negative coordinate."
+    : "");
+
+  if (typeof L === "undefined") {
+    host.innerHTML = '<div class="empty">Map library could not be loaded.</div>';
+    return;
+  }
+  // A slice can have no GPS fixes and still have something to map: the wave
+  // measurements carry their own positions. Only bail when neither does.
+  const anyDrift = waveRows.some((r) =>
+    Number.isFinite(r.lat) && Number.isFinite(r.lng) && !isNullIsland(r));
+  if (!pts.length && !anyDrift) {
+    if (trackMap) { trackMap.remove(); trackMap = null; trackFitKey = ""; }
+    host.innerHTML = '<div class="empty">Nothing in this range has a usable position.</div>';
+    return;
+  }
+
+  if (!trackMap) {
+    host.innerHTML = "";
+    // The canvas renderer keeps a few thousand fixes cheap and still hit-tests
+    // them; the wheel stays with the page until the map is clicked, so scrolling
+    // past the card does not zoom it.
+    trackMap = L.map(host, { preferCanvas: true, scrollWheelZoom: false });
+    trackMap.on("click", () => trackMap.scrollWheelZoom.enable());
+    trackMap.on("mouseout", () => trackMap.scrollWheelZoom.disable());
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    }).addTo(trackMap);
+    trackLayer = L.layerGroup().addTo(trackMap);
+  }
+
+  // The card is hidden whenever a slice has no GPS, so the map may have been
+  // laid out at zero size since the last render.
+  trackMap.invalidateSize();
+  trackLayer.clearLayers();
+
+  /*
+    GPS fixes are DOTS, not a polyline.
+
+    A line between consecutive fixes asserts the buoy went straight between them,
+    which over the gaps in a sparse LoRa uplink is a claim the data does not
+    make - and it also collided visually with the drift lines below, which are a
+    line about something else entirely. Dots say only what was measured: the buoy
+    was here, then here.
+  */
+  const color = seriesColor(0);
+  const latlngs = pts.map((r) => [r.lat, r.lng]);
+  for (const r of pts) {
+    L.circleMarker([r.lat, r.lng], { radius: 3, color, weight: 1, fillColor: color, fillOpacity: 0.6 })
+      .bindTooltip(fixTooltip(r), { direction: "top", offset: [0, -4] })
+      .addTo(trackLayer);
+  }
+
+  /*
+    One line per wave measurement: from where the capture window started to where
+    it ended, which is the drift over those 30 minutes - surface current, near
+    enough. Both endpoints ride in the 'W' message, so this is measured rather
+    than inferred from whichever GPS fixes happened to arrive.
+
+    Each measurement gets its own hue off the series ramp, so overlapping windows
+    stay separable, and the endpoints are green-to-red so direction is readable
+    without an arrowhead. Drawn after the fixes so a short drift is not buried
+    under the dots it sits among.
+
+    A row with no start position - stored before the column existed, or a capture
+    that held no fix at that end - is skipped here and remains visible as its GPS
+    dots. Nothing is drawn from a position that was not measured.
+  */
+  // driftOf is the same test the lines need - both ends real, neither saturated -
+  // so it decides which rows are drawn as well as what their tooltip says.
+  const drifts = waveRows.filter(driftOf);
+
+  drifts.forEach((r, i) => {
+    const a = [r.lat_start, r.lng_start], b = [r.lat, r.lng];
+    const hue = seriesColor(1 + (i % 4));
+    const d = driftOf(r);
+    const label = "<b>wave #" + r.reading_id + "</b>" +
+      "<div>" + fmtTime(r.ts_start) + " → " + fmtTime(r.ts_end) + "</div>" +
+      // Stored values, so they carry the suffix the rest of the page uses.
+      "<div>H<sub>s</sub>, buoy " + fmtHs(r.hs) + " m · T<sub>p</sub>, buoy " + fmtNum(r.tp) + " s</div>" +
+      // The number the line itself is: how far the window moved, which way, and
+      // how fast. Reading it off the map by eye is what this replaces.
+      "<div>net drift " + fmtDrift(d.metres) + " · " + fmtNum(d.bearing, 0) + "° " +
+        compass(d.bearing) + (d.speed === null ? "" : " · " + fmtNum(d.speed, 3) + " m/s") + "</div>";
+
+    L.polyline([a, b], { color: hue, weight: 3, opacity: 0.9 })
+      .bindTooltip(label, { direction: "top" })
+      .addTo(trackLayer);
+    // Green where the window opened, red where it closed. Filled circles rather
+    // than markers so they scale with the map and cost nothing to draw.
+    L.circleMarker(a, { radius: 4, color: "#12a150", weight: 2, fillColor: "#12a150", fillOpacity: 1 })
+      .bindTooltip(label + "<div>window start</div>", { direction: "top" }).addTo(trackLayer);
+    L.circleMarker(b, { radius: 4, color: "#e5484d", weight: 2, fillColor: "#e5484d", fillOpacity: 1 })
+      .bindTooltip(label + "<div>window end</div>", { direction: "top" }).addTo(trackLayer);
+  });
+
+  /*
+    The newest fix, labelled. The "start" label the old polyline carried went with
+    it: with dots there is no track for it to be the start OF, and the wave lines
+    carry their own start markers now.
+
+    Guarded, because pts can be empty - a slice may have drift lines and no GPS
+    notes at all.
+  */
+  const last = pts.length ? pts[pts.length - 1] : null;
+  if (last) {
+    L.circleMarker([last.lat, last.lng], {
+      radius: 6, color, weight: 2, fillColor: color, fillOpacity: 1, interactive: false,
+    }).addTo(trackLayer)
+      .bindTooltip(last.lat.toFixed(4) + ", " + last.lng.toFixed(4),
+        { permanent: true, direction: "right", offset: [7, 0] });
+  }
+
+  // Resizing must not yank a map the user has panned, so the view is only fitted
+  // when the underlying slice actually changed. The drift lines are inside the
+  // bounds too - a measurement can sit outside the GPS fixes that reached us.
+  const key = pts.length + ":" + (pts[0] ? pts[0].timestamp : 0) +
+              ":" + (last ? last.timestamp : 0) + ":" + drifts.length;
+  if (key !== trackFitKey) {
+    trackFitKey = key;
+    const all = latlngs.concat(drifts.flatMap((r) => [[r.lat_start, r.lng_start], [r.lat, r.lng]]));
+    if (all.length) {
+      // maxZoom keeps a buoy that has barely moved from zooming to street level.
+      trackMap.fitBounds(L.latLngBounds(all), { padding: [24, 24], maxZoom: 16 });
+    }
+  }
+}
+
+/* ---------- waterfall (canvas) ---------- */
+
+function drawWaterfall(host, tip) {
+  host.innerHTML = "";
+  if (!waveRows.length) {
+    host.innerHTML = '<div class="empty">No measurements in this range.</div>';
+    return;
+  }
+
+  const W = Math.max(host.clientWidth || 640, 320);
+  const H = 260;
+  const M = { t: 8, r: 12, b: 26, l: 46 };
+  const pw = W - M.l - M.r;
+  const ph = H - M.t - M.b;
+
+  const canvas = document.createElement("canvas");
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+  canvas.style.cursor = "crosshair";
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+
+  // Absolute scale across the whole slice, so columns are comparable. Both the
+  // scale and the frequency axis are taken over the bins that survive the
+  // taper - a peak that sits below it must not set the colour scale for the
+  // band that is actually drawn.
+  // Rows that carried no spectrum have no frequency axis to contribute. The drifter
+  // can be built with kSendPsd off, which ships num_bins = 0 and keeps only the wave
+  // parameters, and such a row still holds its column in the time order - the paint
+  // loop below skips it. The axis has to be taken over the rows that DO have bins:
+  // one undefined freqs[0] would make Math.min NaN and blank the whole waterfall,
+  // including every measurement that came with a perfectly good spectrum.
+  const withBins = waveRows.filter((r) => r.freqs.length);
+  if (!withBins.length) {
+    host.innerHTML = '<div class="empty">No measurement in this range carried a spectrum.</div>';
+    return;
+  }
+  // taperF1 is the floor because that is where the weight reaches zero and
+  // spectrumOf stops emitting bins - the axis must not open below the first bin
+  // anything is actually drawn in.
+  const fmin = Math.max(taperF1, Math.min(...withBins.map((r) => r.freqs[0])));
+  const fmax = Math.max(...withBins.map((r) => r.freqs[r.freqs.length - 1]));
+  if (!(fmax > fmin)) {
+    host.innerHTML = '<div class="empty">Nothing above the ' + taperOption(taperF1) + ' Hz taper floor in this range.</div>';
+    return;
+  }
+  let vmax = 0;
+  for (const r of waveRows) {
+    for (const v of spectrumOf(r).psd) if (v > vmax) vmax = v;
+  }
+  vmax = vmax || 1;
+
+  const ramp = rampSteps();
+  const dark = isDark();
+  // Sequential, one hue: near-zero recedes toward the surface, so the ramp runs
+  // light-to-dark on a light surface and dark-to-light on a dark one.
+  const colorOf = (t) => {
+    const i = Math.max(0, Math.min(ramp.length - 1, Math.round(t * (ramp.length - 1))));
+    return dark ? ramp[ramp.length - 1 - i] : ramp[i];
+  };
+
+  const colW = pw / waveRows.length;
+  // Through spectrumOf, not a second filter loop: the colour scale above already
+  // goes through it, and a waterfall painting bins the scale never saw - or
+  // painting untapered values against a tapered vmax - is exactly the drift this
+  // duplication invites.
+  waveRows.forEach((r, ci) => {
+    const { freqs, psd, df } = spectrumOf(r);
+    for (let b = 0; b < freqs.length; b++) {
+      // The first surviving bin is half a bin wide below its own centre, which
+      // can reach under the taper floor - clamp so no column paints past the axis.
+      const f0 = Math.max(fmin, freqs[b] - 0.5 * df);
+      const f1 = freqs[b] + 0.5 * df;
+      const y0 = M.t + ph - ((f1 - fmin) / (fmax - fmin)) * ph;
+      const y1 = M.t + ph - ((f0 - fmin) / (fmax - fmin)) * ph;
+      ctx.fillStyle = colorOf(Math.sqrt(psd[b] / vmax)); // sqrt: swell peaks are narrow
+      ctx.fillRect(M.l + ci * colW, y0, Math.ceil(colW) + 0.5, Math.ceil(y1 - y0) + 0.5);
+    }
+  });
+
+  ctx.font = '11px system-ui, -apple-system, "Segoe UI", sans-serif';
+  ctx.fillStyle = css("--text-muted");
+  ctx.textAlign = "right";
+  for (const t of niceTicks(fmin, fmax, 4)) {
+    if (t < fmin || t > fmax) continue;
+    const y = M.t + ph - ((t - fmin) / (fmax - fmin)) * ph;
+    ctx.fillText(t.toFixed(2), M.l - 8, y + 4);
+  }
+  ctx.save();
+  ctx.translate(12, M.t + ph / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = "center";
+  ctx.fillText("Hz", 0, 0);
+  ctx.restore();
+
+  ctx.textAlign = "center";
+  const xticks = Math.min(6, waveRows.length);
+  for (let i = 0; i < xticks; i++) {
+    const idx = Math.round((i / Math.max(xticks - 1, 1)) * (waveRows.length - 1));
+    ctx.fillText(fmtDate(waveRows[idx].ts_start), M.l + (idx + 0.5) * colW, H - 8);
+  }
+
+  ctx.strokeStyle = css("--axis");
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(M.l, M.t + ph + 0.5);
+  ctx.lineTo(M.l + pw, M.t + ph + 0.5);
+  ctx.stroke();
+
+  const indexAt = (clientX) => {
+    const b = canvas.getBoundingClientRect();
+    return Math.max(0, Math.min(waveRows.length - 1, Math.floor((clientX - b.left - M.l) / colW)));
+  };
+
+  canvas.addEventListener("mousemove", (e) => {
+    const i = indexAt(e.clientX);
+    const r = waveRows[i];
+    tip.innerHTML = "<b>" + fmtTime(r.ts_start) + "</b>" +
+      // Stored values, so they carry the suffix the rest of the page uses.
+      "<div>H<sub>s</sub>, buoy " + fmtHs(r.hs) + " m · T<sub>p</sub>, buoy " + fmtNum(r.tp) + " s</div>" +
+      "<div>peak PSD " + fmtNum(Math.max(...spectrumOf(r).psd), 4) + " m²/Hz</div>";
+    placeTip(tip, host, canvas.getBoundingClientRect(), M.l + (i + 0.5) * colW, M.t - 8);
+    if (!pinned) { selectedIndex = i; renderSpectrum(); }
+  });
+  canvas.addEventListener("mouseleave", () => { tip.style.opacity = 0; });
+  canvas.addEventListener("click", (e) => {
+    const i = indexAt(e.clientX);
+    pinned = !(pinned && selectedIndex === i);
+    selectedIndex = i;
+    renderSpectrum();
+  });
+
+  host.appendChild(canvas);
+
+  // Colorbar legend - the waterfall encodes on color alone, so it needs one.
+  const cb = document.getElementById("cb");
+  const cctx = cb.getContext("2d");
+  for (let x = 0; x < cb.width; x++) {
+    cctx.fillStyle = colorOf(x / (cb.width - 1));
+    cctx.fillRect(x, 0, 1, cb.height);
+  }
+  document.getElementById("cb-max").textContent = fmtNum(vmax, 4);
+}
+
+/* ---------- renders ---------- */
+
+const tile = (label, value, unit, note, small) =>
+  '<div class="tile"><div class="label">' + label + '</div><div class="value' + (small ? " small" : "") + '">' + value +
+  (unit ? '<span class="unit">' + unit + "</span>" : "") + '</div><div class="note">' + note + "</div></div>";
+
+function renderTiles() {
+  const host = document.getElementById("tiles");
+  const w = waveRows[waveRows.length - 1];
+  const g = gpsRows[gpsRows.length - 1];
+  const t = tempRows[tempRows.length - 1];
+  let html = "";
+
+  if (w) {
+    /*
+      Two groups, in this order: what the buoy sent, then what this page computed
+      from the spectrum it sent. The ", buoy" suffix marks the first group, and an
+      unqualified name always means "computed here, through the current taper" -
+      which is why Tm01 and Tm02 carry no suffix either.
+
+      Each transmitted value sits directly beside its computed twin's group so the
+      pairs read across: Hs against Hs, Tp against Tp, Tz against Tm02.
+    */
+    html += tile("H<sub>s</sub>, buoy", fmtHs(w.hs), "m", "as transmitted, the drifter's own taper");
+    html += tile("T<sub>p</sub>, buoy", fmtNum(w.tp), "s", "as transmitted, full Welch grid");
+
+    const { freqs, psd, df } = spectrumOf(w);
+    const s = spectralStats(freqs, psd, df);
+    html += tile("H<sub>s</sub>", fmtHs(s.hs), "m", "4√m₀ through " + taperLabel());
+    html += tile("T<sub>p</sub>", fmtNum(s.tp), "s", "1/f at the spectral peak, through " + taperLabel());
+    html += tile("T<sub>m01</sub>", fmtNum(s.tm01), "s", "mean period, m₀/m₁");
+    html += tile("T<sub>m02</sub>", fmtNum(s.tm02), "s",
+      "√(m₀/m₂) · buoy sent T<sub>z</sub> " + fmtNum(w.tz) + " s");
+
+    /*
+      Net drift of the newest capture window. Only shown when that row carries
+      both ends - a missing start position is common on older rows, and a tile
+      reading "—" for a quantity that simply was not measured is noise.
+    */
+    const d = driftOf(w);
+    if (d) {
+      const km = d.metres >= 1000;
+      html += tile("Net drift", km ? (d.metres / 1000).toFixed(2) : Math.round(d.metres),
+        km ? "km" : "m",
+        fmtNum(d.bearing, 0) + "° " + compass(d.bearing) +
+          (d.speed === null ? "" : " · " + fmtNum(d.speed, 3) + " m/s"));
+    }
+  }
+  if (t) {
+    const first = t.temps.map(plausibleTemp).find((v) => v !== null);
+    html += tile("Water temp", first === undefined ? "—" : fmtNum(first), "°C", "sensor 1 of " + t.num_sensors);
+  }
+  if (g) {
+    html += tile("Speed", fmtNum(g.vel), "m/s", "over ground, " + fmtNum(g.direction, 0) + "°");
+    // The newest fix may be a saturated 0, 0 - the same reading the map leaves
+    // off. The tile falls back to the newest real position so it cannot claim
+    // the buoy is off West Africa while the track shows it off Bergen.
+    const p = gpsRows.filter((r) => !isNullIsland(r)).pop();
+    html += p
+      ? tile("Position", p.lat.toFixed(4) + ", " + p.lng.toFixed(4), "", fmtTime(p.timestamp), true)
+      : tile("Position", "—", "", "no signed fix yet", true);
+  }
+
+  const last = [w, g, t].filter(Boolean).map((r) => r.received);
+  if (last.length) {
+    const newest = [w, g, t].filter(Boolean).sort((a, b) => b.received - a.received)[0];
+    html += tile("Received", fmtTime(Math.max(...last)), "", "buoy " + newest.buoy_id, true);
+  }
+
+  host.innerHTML = html;
+}
+
+function renderSpectrum() {
+  const i = selectedIndex >= 0 && selectedIndex < waveRows.length ? selectedIndex : waveRows.length - 1;
+  const r = waveRows[i];
+  const cap = document.getElementById("spec-acc-cap");
+  const meta = document.getElementById("spec-meta");
+  const empty = (html) => {
+    document.getElementById("plot-spec-acc").innerHTML = html;
+    document.getElementById("plot-spec").innerHTML = html;
+    meta.textContent = "";
+  };
+  if (!r) {
+    empty('<div class="empty">No measurements in this range.</div>');
+    cap.textContent = "";
+    return;
+  }
+
+  const { freqs, psd, psdAcc, df, bins } = spectrumOf(r);
+  if (!freqs.length) {
+    // Two different nothings: the taper ate every bin, or none were sent at all.
+    empty(bins
+      ? '<div class="empty">Every bin in this measurement is below ' + taperLabel() + '.</div>'
+      : '<div class="empty">This measurement carried no spectrum — the drifter sent num_bins = 0.</div>');
+    return;
+  }
+
+  cap.textContent = fmtTime(r.ts_start) + " – " + fmtTime(r.ts_end) +
+    (pinned ? " (pinned — click the column again to release)" : " (latest; hover the waterfall to change)") +
+    " · S_acc in m²/s⁴/Hz, exactly as transmitted.";
+
+  // 3 significant figures, trailing zeros trimmed: the same call reads a 0.02 Hz
+  // decade tick and a 0.0234 Hz bin centre in the tooltip.
+  const hz = (v) => Number(v.toPrecision(3));
+  const fmtHz = (v) => hz(v) + " Hz";
+
+  /*
+    The same scalars the wave table carries, for the one measurement on screen.
+    Bin count is per row and never assumed constant across the slice, so it is
+    read off this spectrum rather than off num_bins.
+  */
+  const stats = spectralStats(freqs, psd, df);
+  const drift = driftOf(r);
+  // Same split as the tiles: transmitted first, then computed. An unqualified
+  // name is the computed one throughout the page.
+  meta.innerHTML = [
+    "H<sub>s</sub>, buoy <b>" + fmtHs(r.hs) + "</b> m",
+    "T<sub>p</sub>, buoy <b>" + fmtNum(r.tp) + "</b> s",
+    "T<sub>z</sub> <b>" + fmtNum(r.tz) + "</b> s",
+    "T<sub>c</sub> <b>" + fmtNum(r.tc) + "</b> s",
+    "H<sub>s</sub> <b>" + fmtHs(stats.hs) + "</b> m",
+    "T<sub>p</sub> <b>" + fmtNum(stats.tp) + "</b> s",
+    "T<sub>m01</sub> <b>" + fmtNum(stats.tm01) + "</b> s",
+    "T<sub>m02</sub> <b>" + fmtNum(stats.tm02) + "</b> s",
+    // Omitted rather than dashed when this row carries only one position.
+    ...(drift ? ["net drift <b>" + fmtDrift(drift.metres) + "</b> " +
+                 fmtNum(drift.bearing, 0) + "° " + compass(drift.bearing)] : []),
+    // The peak of what is drawn, not the stored one - raising the taper can
+    // leave the stored peak outside the plotted band.
+    "peak PSD <b>" + fmtNum(Math.max(...psd), 4) + "</b> m²/Hz",
+    "<b>" + freqs.length + "</b> of " + bins + " bins, " + hz(freqs[0]) + "–" +
+      hz(freqs[freqs.length - 1]) + " Hz" + (df ? " (df " + df.toFixed(4) + ")" : ""),
+    "buoy <b>" + r.buoy_id + "</b>, reading <b>" + r.reading_id + "</b>",
+  ].join('<span class="sep">·</span>');
+
+  /*
+    Both charts get the same decade ladder, so a bin that moves two ticks up
+    between them moved two decades. That is the whole point of stacking them:
+    the gap between the pair is (2*pi*f)^4, widest at the low end.
+
+    Fixed decades over ten orders of magnitude mean toFixed would print 0.0000
+    for most of the axis, so the tooltip and the endpoint label go exponential
+    below the range where a plain decimal still says something.
+  */
+  const DECADES = [1e0, 1e-2, 1e-4, 1e-6, 1e-8, 1e-10];
+  const spectrumChart = (plot, tip, values, color, unit) =>
+    lineChart(document.getElementById(plot), document.getElementById(tip), {
+      x: freqs,
+      series: [{ name: "PSD", color, values }],
+      height: 200,
+      yFormat: (v) => (v >= 1e-3 ? v.toFixed(4) : v.toExponential(2)),
+      xFormat: fmtHz,
+      yUnit: unit,
+      tipTime: false,
+      xScale: "log",
+      yScale: "log",
+      yTickValues: DECADES,
+    });
+
+  spectrumChart("plot-spec-acc", "tip-spec-acc", psdAcc, seriesColor(1), "m²/s⁴/Hz");
+  spectrumChart("plot-spec", "tip-spec", psd, seriesColor(0), "m²/Hz");
+}
+
+function renderWave() {
+  const has = waveRows.length > 0;
+  ["sec-wave", "card-hs", "card-periods", "card-fall", "card-spec-acc", "card-spec"].forEach((id) =>
+    document.getElementById(id).toggleAttribute("hidden", !has));
+  if (!has) return;
+
+  const x = waveRows.map((r) => r.ts_start);
+
+  lineChart(document.getElementById("plot-hs"), document.getElementById("tip-hs"), {
+    x,
+    series: [{ name: "Hs", color: seriesColor(0), values: waveRows.map((r) => r.hs) }],
+    yUnit: "m",
+    points: true,
+    // Tooltip and the current-value readout. The y-axis ticks are not affected:
+    // a linear axis derives its own decimals from the tick step (stepDecimals).
+    yFormat: fmtHs,
+  });
+
+  /*
+    Six periods on one axis: three the drifter sent and three computed here from
+    the spectrum it sent. Two of them are the same quantity twice - Tp against
+    "Tp, buoy" and Tm02 against Tz - and the gap between each of those pairs is
+    what the taper and the wire format disagree about, drawn rather than tabulated.
+
+    The computed three are derived per row rather than cached: they depend on the
+    taper, and renderWave is what applyTaper calls, so the lines follow the
+    pickers for free.
+  */
+  const waveStats = waveRows.map((r) => {
+    const { freqs, psd, df } = spectrumOf(r);
+    return spectralStats(freqs, psd, df);
+  });
+  const periods = [
+    { name: "Tp, buoy", color: seriesColor(0), values: waveRows.map((r) => r.tp) },
+    { name: "Tz", color: seriesColor(1), values: waveRows.map((r) => r.tz) },
+    { name: "Tc", color: seriesColor(2), values: waveRows.map((r) => r.tc) },
+    { name: "Tp", color: seriesColor(3), values: waveStats.map((s) => s.tp) },
+    { name: "Tm01", color: seriesColor(4), values: waveStats.map((s) => s.tm01) },
+    { name: "Tm02", color: seriesColor(5), values: waveStats.map((s) => s.tm02) },
+  ];
+  document.getElementById("legend-periods").innerHTML = periods
+    .map((s) => '<span><i class="swatch" style="background:' + s.color + '"></i>' + s.name + "</span>").join("");
+  lineChart(document.getElementById("plot-periods"), document.getElementById("tip-periods"), { x, series: periods, yUnit: "s" });
+
+  drawWaterfall(document.getElementById("plot-fall"), document.getElementById("tip-fall"));
+  renderSpectrum();
+}
+
+function renderGps() {
+  /*
+    The map is shown whenever there is anything to put on it, which is no longer
+    the same as "there are GPS fixes": a wave measurement carries its own start
+    and end position, so a slice with no 'G' notes at all can still have drift
+    lines to draw. The speed chart still needs GPS - it is the only source of
+    speed over ground - so the two are gated separately.
+  */
+  const hasGps = gpsRows.length > 0;
+  const hasDrift = waveRows.some((r) => Number.isFinite(r.lat) && Number.isFinite(r.lng));
+  const has = hasGps || hasDrift;
+  ["sec-gps", "card-track"].forEach((id) =>
+    document.getElementById(id).toggleAttribute("hidden", !has));
+  document.getElementById("card-speed").toggleAttribute("hidden", !hasGps);
+  if (has) trackChart(document.getElementById("plot-track"), gpsRows);
+  if (!hasGps) return;
+
+  const speed = [{ name: "Speed", color: seriesColor(0), values: gpsRows.map((r) => r.vel) }];
+  // Heading shares the x but not the unit, so it rides in the tooltip instead of
+  // getting a second y-axis.
+  speed.extraTip = (i) => '<div class="row">heading ' + fmtNum(gpsRows[i].direction, 0) + "°</div>";
+  lineChart(document.getElementById("plot-speed"), document.getElementById("tip-speed"), {
+    x: gpsRows.map((r) => r.timestamp),
+    series: speed,
+    yFormat: (v) => v.toFixed(2),
+    yUnit: "m/s",
+  });
+}
+
+function renderTemp() {
+  const has = tempRows.length > 0;
+  ["sec-temp", "card-temp"].forEach((id) => document.getElementById(id).toggleAttribute("hidden", !has));
+  if (!has) return;
+
+  // Slots are assigned by sensor index and never by rank, so a sensor keeps its
+  // colour when another one drops out of the slice. Eight is the hardware limit
+  // and also the palette's limit - nothing is ever cycled.
+  const sensors = Math.min(8, Math.max(...tempRows.map((r) => r.temps.length)));
+  const series = [];
+  for (let s = 0; s < sensors; s++) {
+    const values = tempRows.map((r) => plausibleTemp(r.temps[s]));
+    if (values.every((v) => v === null)) continue;
+    series.push({ name: "Sensor " + (s + 1), color: seriesColor(s), values });
+  }
+
+  document.getElementById("legend-temp").innerHTML = series
+    .map((s) => '<span><i class="swatch" style="background:' + s.color + '"></i>' + s.name + "</span>").join("");
+
+  lineChart(document.getElementById("plot-temp"), document.getElementById("tip-temp"), {
+    x: tempRows.map((r) => r.timestamp),
+    series,
+    yFormat: (v) => v.toFixed(1),
+    yUnit: "°C",
+  });
+}
+
+/*
+  `detail`, when given, makes every row expandable: the row gets a disclosure
+  cell and a hidden sibling row holding whatever the function returns. Rows are
+  focusable and answer Enter/Space, so the raw values are reachable without a
+  mouse - a tooltip or a hover is never the only way to read a number here.
+*/
+function buildTable(id, head, rows, cells, detail) {
+  const t = document.getElementById(id);
+  const ordered = rows.slice().reverse();
+  const span = head.length + (detail ? 1 : 0);
+
+  t.innerHTML =
+    "<thead><tr>" + (detail ? "<th></th>" : "") + head.map((h) => "<th>" + h + "</th>").join("") + "</tr></thead>" +
+    "<tbody>" + ordered.map((r, i) => {
+      const body = cells(r).map((c) => "<td>" + c + "</td>").join("");
+      if (!detail) return "<tr>" + body + "</tr>";
+      return '<tr class="expandable" tabindex="0" role="button" aria-expanded="false" data-row="' + i + '">' +
+             '<td class="chev">&#9656;</td>' + body + "</tr>" +
+             '<tr class="detail" data-detail="' + i + '" hidden><td colspan="' + span + '"></td></tr>';
+    }).join("") + "</tbody>";
+
+  if (!detail) return;
+
+  const toggle = (tr) => {
+    const i = tr.dataset.row;
+    const row = t.querySelector('tr[data-detail="' + i + '"]');
+    const open = tr.getAttribute("aria-expanded") === "true";
+    if (!open && !row.firstElementChild.innerHTML) {
+      // Built on first open: 51-102 bins per measurement is a lot of DOM to
+      // create for rows nobody expands.
+      row.firstElementChild.innerHTML = detail(ordered[i]);
+    }
+    tr.setAttribute("aria-expanded", String(!open));
+    tr.firstElementChild.innerHTML = open ? "&#9656;" : "&#9662;";
+    row.toggleAttribute("hidden", open);
+  };
+
+  t.querySelectorAll("tr.expandable").forEach((tr) => {
+    tr.addEventListener("click", () => toggle(tr));
+    tr.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(tr); }
+    });
+  });
+}
+
+/*
+  Every bin of one measurement, exactly as wave_bin holds it: the transmitted
+  acceleration PSD beside the elevation PSD derived from it, at the centre
+  frequency stored with them. Both spectra are shown because the conversion is
+  the one step between the wire and everything plotted above, and this is where
+  it can be checked - the ratio between the two columns is (2*pi*f)^4 and
+  nothing else. The taper does not apply here; this is the stored row.
+*/
+function spectrumDetail(r) {
+  const bins = r.spectrum.length;
+  if (!bins) return '<div class="cap">This measurement carried no spectrum.</div>';
+
+  const df = r.freqs.length > 1 ? r.freqs[1] - r.freqs[0] : 0;
+  const peak = r.spectrum.indexOf(Math.max(...r.spectrum));
+  const num = (v, d) => (v === null || v === undefined ? "—" : Number(v).toExponential(d));
+
+  const rows = r.spectrum.map((psd, i) => {
+    const mark = i === peak ? " &#9664; peak" : "";
+    return "<tr><td>" + i + "</td><td>" + r.freqs[i].toFixed(4) + "</td><td>" +
+           num(r.spectrum_acc[i], 3) + "</td><td>" + num(psd, 3) + mark + "</td></tr>";
+  }).join("");
+
+  return '<div class="bins"><table><caption>' + bins + " bins · df " + df.toFixed(6) +
+         " Hz · peak elevation PSD " + fmtNum(Math.max(...r.spectrum), 6) + " m²/Hz · " +
+         "S<sub>η</sub> = S<sub>acc</sub> / (2πf)⁴" +
+         "</caption><thead><tr><th>bin</th><th>f (Hz)</th><th>S<sub>acc</sub> (m²/s⁴/Hz)</th>" +
+         "<th>S<sub>η</sub> (m²/Hz)</th></tr></thead>" +
+         "<tbody>" + rows + "</tbody></table></div>";
+}
+
+function renderTables() {
+  document.getElementById("card-table-wave").toggleAttribute("hidden", !waveRows.length);
+  document.getElementById("card-table-gps").toggleAttribute("hidden", !gpsRows.length);
+  document.getElementById("card-table-temp").toggleAttribute("hidden", !tempRows.length);
+
+  // Transmitted columns first, computed ones after, matching the tiles and the
+  // meta line: a header without "buoy" is a value this page derived.
+  buildTable("table-wave",
+    ["Received", "Window start", "Buoy", "Reading",
+     "Hs buoy (m)", "Tp buoy (s)", "Tz (s)", "Tc (s)",
+     "Hs (m)", "Tp (s)", "Tm01 (s)", "Tm02 (s)",
+     "Drift", "Drift (°)", "Peak PSD", "Bins", "RSSI"],
+    waveRows,
+    (r) => {
+      const { freqs, psd, df } = spectrumOf(r);
+      const s = spectralStats(freqs, psd, df);
+      const d = driftOf(r);
+      // The four cells that depend on the taper rather than on the stored row,
+      // tagged so moving the taper can rewrite them without rebuilding the table
+      // - see retaperTable. Drift is not among them: it is two positions.
+      const tapered = (stat, text) => '<span class="taper-val" data-stat="' + stat + '">' + text + "</span>";
+      return [fmtTime(r.received), fmtTime(r.ts_start), r.buoy_id, r.reading_id,
+              fmtHs(r.hs), fmtNum(r.tp), fmtNum(r.tz), fmtNum(r.tc),
+              tapered("hs", fmtHs(s.hs)), tapered("tp", fmtNum(s.tp)),
+              tapered("tm01", fmtNum(s.tm01)), tapered("tm02", fmtNum(s.tm02)),
+              d ? fmtDrift(d.metres) : "—",
+              d ? fmtNum(d.bearing, 0) + " " + compass(d.bearing) : "—",
+              fmtNum(r.spectrum.length ? Math.max(...r.spectrum) : null, 4), r.num_bins,
+              r.rssi === null ? "—" : r.rssi];
+    },
+    spectrumDetail);
+
+  buildTable("table-gps",
+    ["Received", "Fix time", "Buoy", "Reading", "Latitude", "Longitude", "Speed (m/s)", "Heading (°)", "RSSI"],
+    gpsRows,
+    (r) => [fmtTime(r.received), fmtTime(r.timestamp), r.buoy_id, r.reading_id, r.lat.toFixed(5), r.lng.toFixed(5),
+            fmtNum(r.vel), fmtNum(r.direction, 0), r.rssi === null ? "—" : r.rssi]);
+
+  const maxSensors = tempRows.length ? Math.max(...tempRows.map((r) => r.temps.length)) : 0;
+  const tempHead = ["Received", "Reading time", "Buoy", "Reading"];
+  for (let s = 0; s < maxSensors; s++) tempHead.push("S" + (s + 1) + " (°C)");
+  tempHead.push("RSSI");
+  buildTable("table-temp", tempHead, tempRows, (r) => {
+    const cells = [fmtTime(r.received), fmtTime(r.timestamp), r.buoy_id, r.reading_id];
+    for (let s = 0; s < maxSensors; s++) cells.push(fmtNum(r.temps[s], 2));
+    cells.push(r.rssi === null ? "—" : r.rssi);
+    return cells;
+  });
+}
+
+/*
+  The wave table's taper-derived columns - Hs, Tp, Tm01, Tm02 - recomputed for a
+  moved taper.
+
+  Rewriting the one cell rather than calling renderTables() for two reasons. The
+  cheap one is cost: the taper fires on every keystroke and spinner step, and
+  rebuilding a thousand rows of DOM plus their listeners on each is the kind of
+  work that turns a drag into a stutter. The real one is state - buildTable
+  regenerates the tbody, which collapses every expanded spectrum and drops the
+  focused row. Nudging the taper while reading a measurement's bins would close
+  the thing being read.
+
+  Rows are in the same order buildTable laid them out, i.e. newest first, so the
+  reverse here has to match the reverse there. Walking rows rather than cells is
+  what keeps that safe as columns are added: each row carries its own tagged
+  cells, so the pairing cannot slip by a column count.
+*/
+function retaperTable() {
+  const rows = document.querySelectorAll("#table-wave tr.expandable");
+  if (!rows.length) return;
+  const ordered = waveRows.slice().reverse();
+  rows.forEach((tr, i) => {
+    const { freqs, psd, df } = spectrumOf(ordered[i]);
+    const s = spectralStats(freqs, psd, df);
+    tr.querySelectorAll(".taper-val").forEach((el) => {
+      const stat = el.dataset.stat;
+      el.textContent = stat === "hs" ? fmtHs(s.hs) : fmtNum(s[stat]);
+    });
+  });
+}
+
+function renderAll() {
+  renderTiles();
+  renderWave();
+  renderGps();
+  renderTemp();
+  renderTables();
+}
+
+/* ---------- data ---------- */
+
+async function load() {
+  const params = new URLSearchParams();
+  if (buoy !== "all") params.set("buoy", buoy);
+  if (site !== "all") params.set("site", site);
+  if (dateFrom || dateTo) {
+    // Local midnight; `to` is inclusive of its whole day, so the bound is the next midnight.
+    if (dateFrom) params.set("from", String(Math.floor(new Date(dateFrom + "T00:00:00").getTime() / 1000)));
+    if (dateTo) {
+      const end = new Date(dateTo + "T00:00:00");
+      end.setDate(end.getDate() + 1);
+      params.set("to", String(Math.floor(end.getTime() / 1000)));
+    }
+  } else if (hours > 0) params.set("hours", String(hours));
+  const q = "?" + params.toString();
+
+  const sub = document.getElementById("subtitle");
+  try {
+    const [wave, gps, temp] = await Promise.all([
+      fetch("/api/wave" + q).then((r) => r.json()),
+      fetch("/api/gps" + q).then((r) => r.json()),
+      fetch("/api/temperature" + q).then((r) => r.json()),
+    ]);
+    waveAll = wave.rows || [];
+    gpsRows = gps.rows || [];
+    tempRows = temp.rows || [];
+    applyMinDrift();
+    pinned = false;
+    selectedIndex = -1;
+
+    updateSubtitle();
+    renderAll();
+  } catch (err) {
+    sub.textContent = "Could not load data: " + err.message;
+  }
+}
+
+/*
+  The count line. Shared by load and the drift picker, because the drift filter
+  changes what is on screen without going near the network - and a header that
+  still claimed 60 wave measurements while the page drew 9 would be the most
+  visible lie on it.
+
+  Rows hidden by the filter are named, not silently subtracted. A filter that
+  quietly empties the page looks exactly like a buoy that stopped reporting, and
+  those two need to be told apart at a glance.
+*/
+function updateSubtitle() {
+  const sub = document.getElementById("subtitle");
+  const total = waveAll.length + gpsRows.length + tempRows.length;
+  if (!total) {
+    sub.textContent = "No measurements yet.";
+    return;
+  }
+  const newest = Math.max(0, ...[...waveAll, ...gpsRows, ...tempRows].map((r) => r.received));
+  const hidden = waveAll.length - waveRows.length;
+  sub.textContent = waveRows.length + " wave · " + gpsRows.length + " GPS · " + tempRows.length +
+    " temperature — last received " + fmtTime(newest) +
+    (hidden ? " · " + hidden + " wave " + (hidden === 1 ? "row" : "rows") +
+              " hidden by net drift filter" : "");
+}
+
+async function loadBuoys() {
+  const sel = document.getElementById("buoy");
+  try {
+    const { buoys } = await fetch("/api/buoys").then((r) => r.json());
+    sel.innerHTML = '<option value="all">All buoys</option>' +
+      buoys.map((b) => '<option value="' + b.buoy_id + '">Buoy ' + b.buoy_id + " (" + b.readings + ")</option>").join("");
+  } catch {
+    sel.innerHTML = '<option value="all">All buoys</option>';
+  }
+  // Same guard as loadSites: a remembered buoy that no longer reports would
+  // leave the picker on "All buoys" while the state still filtered on it.
+  if (!Array.from(sel.options).some((o) => o.value === buoy)) buoy = "all";
+  sel.value = buoy;
+}
+
+/*
+  The place picker. The count shown is measurements inside the box, summed across
+  the three tables, and it is there to make an empty site visible as an empty
+  site: a box drawn slightly wrong reads as "the filter is broken" otherwise, and
+  the two are indistinguishable from the outside.
+
+  Sites are listed even at zero, because a place you have not been to yet is
+  still a place, and its absence from the list would be the more confusing bug.
+*/
+async function loadSites() {
+  const sel = document.getElementById("site");
+  const all = '<option value="all">All places</option>';
+  try {
+    const { sites } = await fetch("/api/sites").then((r) => r.json());
+    sel.innerHTML = all + sites.map((s) => {
+      const n = (s.wave_rows || 0) + (s.gps_rows || 0) + (s.temp_rows || 0);
+      return '<option value="' + s.name.replace(/"/g, "&quot;") + '">' + s.name + " (" + n + ")</option>";
+    }).join("");
+  } catch {
+    sel.innerHTML = all;
+  }
+  // A remembered place that no longer exists must not leave the picker showing
+  // "All places" while the state still filters on the vanished name.
+  if (!Array.from(sel.options).some((o) => o.value === site)) site = "all";
+  sel.value = site;
+}
+
+document.getElementById("range").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  document.querySelectorAll("#range button").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+  hours = Number(btn.dataset.hours);
+  dateFrom = dateTo = "";
+  dateFromInput.value = dateToInput.value = "";
+  saveSettings();
+  load();
+});
+const dateFromInput = document.getElementById("date-from");
+const dateToInput = document.getElementById("date-to");
+function onDatesChanged() {
+  dateFrom = dateFromInput.value;
+  dateTo = dateToInput.value;
+  // A preset and an explicit window never both look active.
+  const active = !(dateFrom || dateTo);
+  document.querySelectorAll("#range button").forEach((b) =>
+    b.setAttribute("aria-pressed", String(active && Number(b.dataset.hours) === hours)));
+  saveSettings();
+  load();
+}
+dateFromInput.addEventListener("change", onDatesChanged);
+dateToInput.addEventListener("change", onDatesChanged);
+document.getElementById("buoy").addEventListener("change", (e) => { buoy = e.target.value; saveSettings(); load(); });
+// The place filter is applied in SQL, not to rows in hand, so it refetches.
+document.getElementById("site").addEventListener("change", (e) => { site = e.target.value; saveSettings(); load(); });
+// Built from TAPER_STEPS rather than written into the markup, so the list the
+// pickers offer and the list loadSettings validates against are the same list.
+const taperInputs = [document.getElementById("taper-f1"), document.getElementById("taper-f2")];
+taperInputs.forEach((sel, i) => {
+  sel.innerHTML = TAPER_STEPS[i === 0 ? "f1" : "f2"]
+    .map((v) => '<option value="' + taperOption(v) + '">' + taperOption(v) + "</option>")
+    .join("");
+});
+taperInputs[0].value = taperOption(taperF1);
+taperInputs[1].value = taperOption(taperF2);
+
+/*
+  The taper is applied to rows already in hand, so it re-renders rather than
+  refetching. The wave cards, the tiles and the table's "Hs spec" column read it.
+
+  f2 < f1 is the one pair the maths cannot answer - the ramp would run backwards.
+  With two pickers it is resolved by moving the OTHER end out of the way rather
+  than by refusing the choice: whichever one was just clicked is what was meant,
+  and the lists are built so a legal partner always exists (f1 tops out below
+  f2's top, f2 bottoms out at f1's bottom). The correction lands in the picker
+  itself, so what is on screen is always the pair being drawn.
+*/
+function applyTaper(e) {
+  const [s1, s2] = taperInputs;
+  let f1 = Number(s1.value), f2 = Number(s2.value);
+  if (f2 < f1) {
+    if (e && e.target === s2) f1 = [...TAPER_STEPS.f1].reverse().find((v) => v <= f2);
+    else f2 = TAPER_STEPS.f2.find((v) => v >= f1);
+    s1.value = taperOption(f1);
+    s2.value = taperOption(f2);
+  }
+  taperF1 = f1;
+  taperF2 = f2;
+  saveSettings();
+  renderTiles();
+  renderWave();
+  retaperTable();
+}
+taperInputs.forEach((i) => i.addEventListener("change", applyTaper));
+
+/*
+  Minimum net drift, built from DRIFT_STEPS for the same reason the taper is built
+  from TAPER_STEPS: one list, so what the picker offers and what a remembered
+  setting is checked against cannot come apart.
+
+  Like the taper it re-renders rather than refetching - drift is two positions on
+  a row already in hand. Unlike the taper it changes WHICH rows exist, so the
+  waterfall selection is dropped: selectedIndex is a position in waveRows, and
+  keeping it across a filter change would leave it pointing at a different
+  measurement, or past the end.
+*/
+const driftInput = document.getElementById("min-drift");
+driftInput.innerHTML = DRIFT_STEPS
+  .map((v) => '<option value="' + v + '">' + (v === 0 ? "0 (all)" : v) + "</option>").join("");
+driftInput.value = String(minDrift);
+
+const maxDriftInput = document.getElementById("max-drift");
+maxDriftInput.innerHTML = DRIFT_STEPS
+  .map((v) => '<option value="' + v + '">' + (v === 0 ? "0 (no limit)" : v) + "</option>").join("");
+maxDriftInput.value = String(maxDrift);
+
+function applyMinDriftFromPicker() {
+  minDrift = Number(driftInput.value);
+  maxDrift = Number(maxDriftInput.value);
+  applyMinDrift();
+  pinned = false;
+  selectedIndex = -1;
+  saveSettings();
+  updateSubtitle();
+  renderAll();
+}
+driftInput.addEventListener("change", applyMinDriftFromPicker);
+maxDriftInput.addEventListener("change", applyMinDriftFromPicker);
+
+document.getElementById("refresh").addEventListener("click", load);
+document.getElementById("toggleTable").addEventListener("click", (e) => {
+  const tables = document.getElementById("tables");
+  const show = tables.hasAttribute("hidden");
+  tables.toggleAttribute("hidden", !show);
+  e.currentTarget.setAttribute("aria-pressed", String(show));
+  saveSettings();
+});
+
+/*
+  Remembered filters.
+
+  What is worth remembering is what you set deliberately and would have to set
+  again: the taper, which is a considered pair of numbers; the place and buoy,
+  which are where you work; the range; and whether the tables are open.
+
+  What is NOT remembered is anything derived from the data - the pinned waterfall
+  column, the selected measurement - because it names a row that may not be in
+  the next fetch at all.
+
+  Everything is validated on the way back in rather than trusted. localStorage
+  outlives the code that wrote it: a stored range whose button no longer exists,
+  or a taper from a build with different bounds, must not leave the UI showing
+  one thing while the state holds another. Anything unrecognised falls back to
+  the default, and a browser with storage blocked simply gets the defaults every
+  time - hence the try/catch rather than a feature test.
+*/
+/*
+  Theme: "" follows the OS, "light"/"dark" is an explicit choice stamped on <html>,
+  which the stylesheet already honours in both directions. The button flips to the
+  opposite of whatever is showing now, so the first click always does something.
+*/
+let theme = "";
+function isDark() {
+  const t = document.documentElement.dataset.theme;
+  return t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+}
+function applyTheme() {
+  if (theme) document.documentElement.dataset.theme = theme;
+  else delete document.documentElement.dataset.theme;
+  document.getElementById("toggleTheme").textContent = isDark() ? "Light" : "Dark";
+}
+document.getElementById("toggleTheme").addEventListener("click", () => {
+  theme = isDark() ? "light" : "dark";
+  applyTheme();
+  saveSettings();
+  renderAll();
+});
+
+const SETTINGS_KEY = "orb-wave.settings.v1";
+
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      hours, buoy, site, taperF1, taperF2, minDrift, maxDrift, theme, dateFrom, dateTo,
+      tables: !document.getElementById("tables").hasAttribute("hidden"),
+    }));
+  } catch { /* storage disabled or full: the session still works, it just forgets */ }
+}
+
+function loadSettings() {
+  let s;
+  try {
+    s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
+  } catch { s = null; }
+  if (!s || typeof s !== "object") return;
+
+  if (s.theme === "light" || s.theme === "dark") {
+    theme = s.theme;
+    applyTheme();
+  }
+
+  // Range: only a value one of the buttons actually offers, so the pressed state
+  // and the query can never disagree.
+  const btn = document.querySelector('#range button[data-hours="' + Number(s.hours) + '"]');
+  if (btn) {
+    hours = Number(s.hours);
+    document.querySelectorAll("#range button").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+  }
+
+  const isDate = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+  if (isDate(s.dateFrom) || isDate(s.dateTo)) {
+    dateFrom = isDate(s.dateFrom) ? s.dateFrom : "";
+    dateTo = isDate(s.dateTo) ? s.dateTo : "";
+    dateFromInput.value = dateFrom;
+    dateToInput.value = dateTo;
+    document.querySelectorAll("#range button").forEach((b) => b.setAttribute("aria-pressed", "false"));
+  }
+
+  if (typeof s.buoy === "string") buoy = s.buoy;   // checked against the list in loadBuoys
+  if (typeof s.site === "string") site = s.site;   // checked against the list in loadSites
+
+  // The taper only comes back as a pair, and only if both ends are still on the
+  // lists the pickers offer - half a remembered taper is not a taper, and a
+  // value no option carries would blank the picker while the state held it. A
+  // taper stored by a build with a different list therefore falls back to the
+  // default rather than being forced onto the nearest step: a taper is a
+  // deliberate choice, and silently moving it is worse than forgetting it.
+  const f1 = Number(s.taperF1), f2 = Number(s.taperF2);
+  if (TAPER_STEPS.f1.includes(f1) && TAPER_STEPS.f2.includes(f2) && f2 >= f1) {
+    taperF1 = f1;
+    taperF2 = f2;
+    taperInputs[0].value = taperOption(f1);
+    taperInputs[1].value = taperOption(f2);
+  }
+
+  // Same rule as the taper: on the list or not at all. A threshold from a build
+  // with different steps falls back to 0, which shows everything - the safe way
+  // to be wrong, since the other direction hides measurements silently.
+  const md = Number(s.minDrift);
+  if (DRIFT_STEPS.includes(md)) {
+    minDrift = md;
+    driftInput.value = String(md);
+  }
+  const xd = Number(s.maxDrift);
+  if (DRIFT_STEPS.includes(xd)) {
+    maxDrift = xd;
+    maxDriftInput.value = String(xd);
+  }
+
+  if (s.tables === true) {
+    document.getElementById("tables").removeAttribute("hidden");
+    document.getElementById("toggleTable").setAttribute("aria-pressed", "true");
+  }
+}
+
+let resizeTimer;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(renderAll, 150);
+});
+
+// Settings first: the two pickers validate the remembered buoy and place against
+// the lists they fetch, so the state must already hold them when they run.
+applyTheme();
+loadSettings();
+Promise.all([loadBuoys(), loadSites()]).then(load);
+</script>
+</body>
+</html>

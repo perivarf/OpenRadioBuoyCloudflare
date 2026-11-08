@@ -1,0 +1,36 @@
+flowchart TB
+    subgraph sea["At sea"]
+        D1["Drifter buoy<br/>W · G · T · A messages"]
+        D2["Drifter buoy"]
+    end
+
+    subgraph shore["Base station"]
+        BS["LoRa receiver"]
+        NC["Notecard<br/>buoy.qo notefile"]
+    end
+
+    subgraph cloud["Notehub"]
+        NH["Notehub<br/>event store"]
+        RT["HTTP route<br/>X-Ingest-Secret"]
+    end
+
+    subgraph cf["Cloudflare"]
+        W["Worker — orb-wave<br/>src/worker.js"]
+        P["parseMessage()<br/>tag byte 'W' | 'G' | 'T'"]
+        DB[("D1 — orb-wave<br/>wave · gps · temperature")]
+        UI["Dashboard<br/>public/index.html"]
+    end
+
+    B["Browser"]
+
+    D1 -- LoRa --> BS
+    D2 -- LoRa --> BS
+    BS --> NC
+    NC -- "cellular / NTN" --> NH
+    NH --> RT
+    RT -- "POST /api/ingest" --> W
+    W --> P
+    P -- "base64 payload decoded" --> DB
+    P -. "unknown tag (e.g. 'A') → 200, dropped" .-> W
+    DB -- "GET /api/wave · gps · temperature · buoys" --> UI
+    UI --> B

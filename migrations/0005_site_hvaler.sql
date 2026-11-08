@@ -1,0 +1,34 @@
+-- Add Hvaler as a site: the archipelago box that encloses the existing
+-- Skjærhalden box.
+--
+--   npx wrangler d1 execute orb-wave --remote --file=./migrations/0005_site_hvaler.sql
+--
+-- Schema-free on purpose - this only inserts a row into `site`. Sites resolve at
+-- read time (siteOf in worker.js), so the whole history reclassifies the moment
+-- this runs, with no backfill and no Worker deploy. Safe to run before or after
+-- anything else, and safe to re-run: INSERT OR IGNORE against the UNIQUE name.
+--
+-- Nesting is the point, not an accident. siteOf picks the SMALLEST box in
+-- degrees that contains the row, so a measurement inside Skjærhalden still
+-- resolves to Skjærhalden, and only the rest of the archipelago - the western
+-- islands, the outer waters, anything that drifted off the Skjærhalden box -
+-- falls to Hvaler. Counts stay a partition: no row is reported under both.
+--
+-- The box: 58.90-59.20 N, 10.65-11.25 E. It contains the Skjærhalden box
+-- (58.98-59.18, 10.90-11.20) on all four sides, which is what keeps the
+-- smallest-box rule unambiguous - a box that merely clipped it would rank by an
+-- arbitrary tiebreak instead. Generous seaward to catch a free-drifting buoy;
+-- the top edge clips the southern edge of Fredrikstad, which is the deliberate
+-- trade - measurements north of the islands read as Hvaler rather than as
+-- nothing at all.
+INSERT OR IGNORE INTO site (name, lat_min, lat_max, lng_min, lng_max) VALUES
+  ('Hvaler', 58.90, 59.20, 10.65, 11.25);
+
+-- If Hvaler ends up with few rows and Skjærhalden with everything, the cause is
+-- the Skjærhalden box being an archipelago-sized box under a harbour's name
+-- (0.20 x 0.30 degrees, roughly 22 x 17 km). Tightening it to the harbour makes
+-- the split mean what the names say. Left commented out because it is a
+-- judgement call about the existing site, not part of adding this one:
+--
+-- UPDATE site SET lat_min = 59.01, lat_max = 59.06, lng_min = 10.99, lng_max = 11.08
+--  WHERE name = 'Skjærhalden';

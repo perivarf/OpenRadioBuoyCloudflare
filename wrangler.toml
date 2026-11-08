@@ -1,0 +1,19 @@
+name = "orb-wave"
+main = "src/worker.js"
+compatibility_date = "2026-08-01"
+
+# Static assets: public/index.html is served at / by the runtime, and anything
+# that does not match a file falls through to the Worker (i.e. /api/*).
+[assets]
+directory = "./public"
+
+# database_id comes from `wrangler d1 create orb-wave` - paste it here.
+[[d1_databases]]
+binding = "DB"
+database_name = "orb-wave"
+database_id = "67b47dff-28c3-48d5-b484-033299db52c0"
+
+# INGEST_SECRET, DASH_USER and DASH_PASS are NOT set here - they are secrets:
+#  wrangler secret put INGEST_SECRET
+#  wrangler secret put DASH_USER
+#  wrangler secret put DASH_PASS

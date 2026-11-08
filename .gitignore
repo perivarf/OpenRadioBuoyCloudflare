@@ -1,0 +1,7 @@
+node_modules/
+# all dot-directories (.wrangler/, .claude/, .vscode/ ...), except CI config
+.*/
+!.github/
+.dev.vars
+.env
+export/
